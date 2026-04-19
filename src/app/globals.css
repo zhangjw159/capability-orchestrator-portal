@@ -1,0 +1,38 @@
+@import 'tailwindcss';
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+}
+
+h1, h2, h3, h4, h5 {
+  margin: 0;
+}
+
+.clickable {
+  cursor: pointer;
+}
+
+.ant-pro-query-filter.ant-pro-query-filter {
+  padding: 24px 0 !important;
+}
+
+.ant-input-disabled {
+  color: #171725 !important;
+}
+
+.ant-select-disabled .ant-select-selector {
+  color: #171725 !important;
+}
+
+:root {
+  --main-Font-size: 14px;
+  --Primary-Default: #1677ff;
+  --background: #fff;
+  --foreground: #171725;
+}
