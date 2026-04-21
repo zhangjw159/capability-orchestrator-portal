@@ -55,8 +55,18 @@ export interface FlowDefinitionDetail extends FlowDefinitionSummary {
 export interface ValidateFlowResult {
   valid?: boolean;
   errors?: string[];
+  warnings?: string[];
+  errorIssues?: ValidationIssue[];
+  warningIssues?: ValidationIssue[];
   message?: string;
   [key: string]: unknown;
+}
+
+export interface ValidationIssue {
+  code?: string;
+  nodeId?: string;
+  edgeId?: string;
+  message?: string;
 }
 
 export interface ExecuteFlowPayload {
@@ -118,4 +128,13 @@ export interface RegisteredTool {
   discoveredAt?: string;
   inputSchema?: unknown;
   [key: string]: unknown;
+}
+
+export interface OrchestratorSkill {
+  skillId: string;
+  name?: string;
+  status?: string;
+  definition?: Record<string, unknown>;
+  updatedAt?: string;
+  createdAt?: string;
 }

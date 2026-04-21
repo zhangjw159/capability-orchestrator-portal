@@ -8,6 +8,7 @@ import type {
   Flow,
   FlowDefinitionDetail,
   FlowDefinitionSummary,
+  OrchestratorSkill,
   ValidateFlowResult,
 } from '@/types/orchestrator';
 
@@ -18,6 +19,23 @@ type RawValidationIssue = {
   edgeId?: string;
   nodeId?: string;
   message?: string;
+};
+
+type RawSkillItem = {
+  skill_id?: string;
+  id?: string;
+  name?: string;
+  status?: string;
+  enabled?: boolean;
+  definition?: Record<string, unknown> | string;
+  updated_at?: string;
+  created_at?: string;
+};
+
+type RawSkillListResponse = {
+  skills?: RawSkillItem[];
+  list?: RawSkillItem[];
+  items?: RawSkillItem[];
 };
 
 type RawValidationResult = {
@@ -322,7 +340,7 @@ function toCoreFlow(flow: Flow): RawFlow {
   };
 }
 
-function toAssetFlowDsl(flow: Flow): RawAssetFlowDefinitionDsl {
+function _toAssetFlowDsl(flow: Flow): RawAssetFlowDefinitionDsl {
   return {
     id: flow.id,
     name: flow.name,
@@ -421,6 +439,23 @@ function toExecutionStep(raw: RawExecutionStepItem): ExecutionStep {
     finishedAt: raw.finished_at,
     nodeType: raw.node_type,
     transition: raw.transition,
+  };
+}
+
+function normalizeSkill(raw: RawSkillItem): OrchestratorSkill {
+  const status =
+    raw.status ??
+    (typeof raw.enabled === 'boolean' ? (raw.enabled ? 'enabled' : 'disabled') : undefined);
+  return {
+    skillId: String(raw.skill_id ?? raw.id ?? ''),
+    name: raw.name,
+    status,
+    definition:
+      typeof raw.definition === 'string'
+        ? (safeJsonParse<Record<string, unknown>>(raw.definition) ?? {})
+        : (raw.definition ?? {}),
+    updatedAt: raw.updated_at,
+    createdAt: raw.created_at,
   };
 }
 
@@ -524,9 +559,51 @@ export function validateFlow(flow: Flow | Record<string, unknown>) {
         valid: res.valid,
         errors,
         warnings,
+        errorIssues: res.errors ?? [],
+        warningIssues: res.warnings ?? [],
         message: errors[0] ?? warnings[0],
       } as ValidateFlowResult;
     });
+}
+
+export function listSkills() {
+  return request.get<RawSkillListResponse>(`${PREFIX}/skills`).then((raw) => {
+    const res = unwrapResult(raw);
+    const list = res.skills ?? res.list ?? res.items ?? [];
+    return list.map(normalizeSkill);
+  });
+}
+
+export function createSkill(payload: {
+  skillId: string;
+  name?: string;
+  definition?: Record<string, unknown>;
+}) {
+  return request.post<RawSkillItem>(`${PREFIX}/skills`, {
+    skill_id: payload.skillId,
+    name: payload.name,
+    definition: payload.definition ?? {},
+  });
+}
+
+export function updateSkill(
+  skillId: string,
+  payload: { name?: string; definition?: Record<string, unknown> }
+) {
+  return request.put<RawSkillItem>(`${PREFIX}/skills/${encodeURIComponent(skillId)}`, {
+    name: payload.name,
+    definition: payload.definition ?? {},
+  });
+}
+
+export function updateSkillStatus(skillId: string, status: 'enabled' | 'disabled') {
+  return request.post<RawSkillItem>(`${PREFIX}/skills/${encodeURIComponent(skillId)}/status`, {
+    status,
+  });
+}
+
+export function reloadSkills() {
+  return request.post(`${PREFIX}/skills/reload`, {});
 }
 
 export function executeFlow(payload: ExecuteFlowPayload) {

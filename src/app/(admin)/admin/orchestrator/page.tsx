@@ -34,6 +34,13 @@ const OrchestratorHome: React.FC = () => (
         </Card>
       </Link>
     </Col>
+    <Col xs={24} md={12} lg={8}>
+      <Link href="/admin/orchestrator/skills">
+        <Card hoverable title="Skill 管理">
+          管理 skill 定义并在变更后触发 reload。
+        </Card>
+      </Link>
+    </Col>
   </Row>
 );
 
