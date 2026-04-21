@@ -7,8 +7,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import ReactFlow, {
   Background,
   Controls,
+  Handle,
   MarkerType,
   MiniMap,
+  Position,
   addEdge,
   applyEdgeChanges,
   applyNodeChanges,
@@ -22,6 +24,8 @@ import 'reactflow/dist/style.css';
 import { v4 as uuidv4 } from 'uuid';
 
 import { executeFlow, saveDefinition, validateFlow } from '@/api/orchestrator';
+import { listTools } from '@/api/tools';
+import { extractToolsList } from '@/lib/orchestrator';
 import type { Flow, FlowNodeType, OrchestratorSkill, ValidationIssue } from '@/types/orchestrator';
 
 const NODE_TYPES: FlowNodeType[] = [
@@ -42,6 +46,18 @@ type Props = {
   readonlyFlowId?: boolean;
   onSaved?: () => void;
 };
+
+const FlowNodeCard = ({ data }: { data: { label?: string } }) => (
+  <div className='rounded border border-neutral-300 bg-white px-3 py-2 text-xs shadow-sm'>
+    <Handle type='target' position={Position.Top} style={{ width: 8, height: 8, background: '#1677ff' }} />
+    <div className='text-neutral-800'>{data?.label ?? 'node'}</div>
+    <Handle
+      type='source'
+      position={Position.Bottom}
+      style={{ width: 8, height: 8, background: '#1677ff' }}
+    />
+  </div>
+);
 
 function toCanvas(flow: Flow): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = (flow.nodes ?? []).map((node, index) => ({
@@ -93,6 +109,9 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
   const [executing, setExecuting] = useState(false);
   const [inputText, setInputText] = useState('{}');
   const [executeResult, setExecuteResult] = useState<unknown>(null);
+  const [toolOptions, setToolOptions] = useState<
+    Array<{ value: string; label: string; server?: string; name?: string }>
+  >([]);
 
   useEffect(() => {
     const mapped = toCanvas(initialFlow);
@@ -100,6 +119,30 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
     setNodes(mapped.nodes);
     setEdges(mapped.edges);
   }, [initialFlow]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = await listTools();
+        if (cancelled) return;
+        const tools = extractToolsList(raw);
+        setToolOptions(
+          tools.map((tool) => ({
+            value: String(tool.toolId ?? tool.id ?? ''),
+            label: String(tool.displayName ?? tool.name ?? tool.toolId ?? tool.id ?? ''),
+            server: typeof tool.server === 'string' ? tool.server : undefined,
+            name: typeof tool.name === 'string' ? tool.name : undefined,
+          }))
+        );
+      } catch {
+        if (!cancelled) setToolOptions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     setFlowDraft((prev) => toFlow(prev, nodes, edges));
@@ -209,10 +252,33 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
     }
   }, [definitionId, flowDraft, inputText, message, runValidate]);
 
+  const handleAutoConnect = useCallback(() => {
+    if (nodes.length < 2) {
+      message.warning('至少需要两个节点才能自动连线');
+      return;
+    }
+    const sorted = [...nodes].sort((a, b) => {
+      if (a.position.y !== b.position.y) return a.position.y - b.position.y;
+      return a.position.x - b.position.x;
+    });
+    const generated: Edge[] = [];
+    for (let i = 0; i < sorted.length - 1; i += 1) {
+      generated.push({
+        id: `auto-${sorted[i].id}-${sorted[i + 1].id}`,
+        source: sorted[i].id,
+        target: sorted[i + 1].id,
+        markerEnd: { type: MarkerType.ArrowClosed },
+      });
+    }
+    setEdges(generated);
+    message.success('已按节点顺序自动连线');
+  }, [message, nodes]);
+
   const issueNodeIdSet = useMemo(
     () => new Set(validateIssues.map((issue) => issue.nodeId).filter(Boolean)),
     [validateIssues]
   );
+  const nodeTypes = useMemo(() => ({ cardNode: FlowNodeCard }), []);
 
   return (
     <div className="flex flex-col gap-4">
@@ -231,9 +297,10 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
             <ReactFlow
               nodes={nodes.map((node) =>
                 issueNodeIdSet.has(node.id)
-                  ? { ...node, style: { ...node.style, border: '1px solid #ff4d4f' } }
-                  : node
+                  ? { ...node, style: { ...node.style, border: '1px solid #ff4d4f' }, type: 'cardNode' }
+                  : { ...node, type: 'cardNode' }
               )}
+              nodeTypes={nodeTypes}
               edges={edges}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
@@ -245,6 +312,9 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
               <Controls />
               <Background />
             </ReactFlow>
+            <div className="mt-2 text-xs text-neutral-500">
+              连线方式：从节点上方/下方的蓝色圆点按住拖拽到目标节点圆点。
+            </div>
           </div>
         </Card>
         <Card className="col-span-3" title="节点属性" size="small">
@@ -299,13 +369,23 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
                   ) : (
                     <>
                       <Form.Item label="toolId">
-                        <Input
+                        <Select
+                          showSearch
                           value={String((selectedNode.config?.toolId as string) ?? '')}
-                          onChange={(e) =>
+                          placeholder="请选择已注册 tool"
+                          options={toolOptions}
+                          onChange={(value) => {
+                            const selected = toolOptions.find((tool) => tool.value === value);
                             updateNode({
-                              config: { ...(selectedNode.config ?? {}), toolId: e.target.value },
-                            })
-                          }
+                              config: {
+                                ...(selectedNode.config ?? {}),
+                                toolId: value,
+                                ...(selected?.server ? { server: selected.server } : {}),
+                                ...(selected?.name ? { name: selected.name } : {}),
+                                ...(selected?.name ? { tool: selected.name } : {}),
+                              },
+                            });
+                          }}
                         />
                       </Form.Item>
                       <Form.Item label="server">
@@ -339,6 +419,7 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
               <div className="flex flex-col gap-3">
                 <Space wrap>
                   <Button onClick={runValidate}>校验</Button>
+                  <Button onClick={handleAutoConnect}>一键自动连线</Button>
                   <Button type="primary" loading={saving} onClick={handleSave}>
                     保存草稿
                   </Button>

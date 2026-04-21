@@ -12,7 +12,7 @@ import { parseFlowDsl } from '@/lib/orchestrator';
 import type { Flow, OrchestratorSkill } from '@/types/orchestrator';
 
 const defaultFlowText = `{
-  "version": "1",
+  "version": "v1",
   "id": "my-flow",
   "name": "新流程",
   "nodes": [],

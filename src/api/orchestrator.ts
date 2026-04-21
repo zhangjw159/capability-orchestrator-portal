@@ -288,6 +288,13 @@ function toRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function normalizeFlowVersion(version: unknown): string {
+  const raw = String(version ?? '').trim();
+  if (!raw) return 'v1';
+  if (raw === '1' || raw === '1.0') return 'v1';
+  return raw;
+}
+
 function unwrapResult<T>(res: T | ResultEnvelope<T>): T {
   if (!res || typeof res !== 'object') return res as T;
   const envelope = res as ResultEnvelope<T>;
@@ -318,7 +325,7 @@ function toCoreFlow(flow: Flow): RawFlow {
   return {
     id: flow.id,
     name: flow.name,
-    version: flow.version,
+    version: normalizeFlowVersion(flow.version),
     input: flow.input,
     nodes: (flow.nodes ?? []).map((node) => ({
       id: node.id,
@@ -344,7 +351,7 @@ function _toAssetFlowDsl(flow: Flow): RawAssetFlowDefinitionDsl {
   return {
     id: flow.id,
     name: flow.name,
-    version: String(flow.version ?? '1'),
+    version: normalizeFlowVersion(flow.version),
     input_json: JSON.stringify(flow.input ?? {}),
     nodes: (flow.nodes ?? []).map((node) => ({
       id: node.id,
@@ -373,7 +380,7 @@ function buildSaveFlowDefinitionRequest(body: SaveDefinitionPayload): RawSaveFlo
     ({
       id: (body as { flowId?: string }).flowId ?? 'new-flow',
       name: (body as { name?: string }).name ?? 'New Flow',
-      version: String((body as { version?: string | number }).version ?? '1'),
+      version: normalizeFlowVersion((body as { version?: string | number }).version),
       nodes: [],
       edges: [],
     } as Flow);
@@ -381,7 +388,9 @@ function buildSaveFlowDefinitionRequest(body: SaveDefinitionPayload): RawSaveFlo
   const normalizedFlow: Flow = {
     id: flowCandidate.id ?? (body as { flowId?: string }).flowId ?? 'new-flow',
     name: flowCandidate.name ?? (body as { name?: string }).name ?? 'New Flow',
-    version: String(flowCandidate.version ?? (body as { version?: string | number }).version ?? '1'),
+    version: normalizeFlowVersion(
+      flowCandidate.version ?? (body as { version?: string | number }).version
+    ),
     input: flowCandidate.input,
     nodes: (flowCandidate.nodes ?? []).map((node) => ({
       id: node.id,

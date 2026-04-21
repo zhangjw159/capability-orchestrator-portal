@@ -32,7 +32,7 @@ const EditFlowPage = () => {
           if (parsed) setFlow(parsed);
           else {
             setFlow({
-              version: '1',
+              version: 'v1',
               id: detail.flowId || `flow-${definitionId}`,
               name: detail.name || '未命名流程',
               nodes: [],

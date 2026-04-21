@@ -22,7 +22,7 @@ const ExecutePageInner = () => {
   );
   const [definitionId, setDefinitionId] = useState(definitionIdFromQuery);
   const [flowText, setFlowText] = useState(`{
-  "version": "1",
+  "version": "v1",
   "id": "debug-flow",
   "name": "调试",
   "nodes": [],
