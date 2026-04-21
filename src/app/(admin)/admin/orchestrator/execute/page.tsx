@@ -12,6 +12,57 @@ import JsonEditor from '@/components/orchestrator/JsonEditor';
 import { parseFlowDsl } from '@/lib/orchestrator';
 import type { Flow } from '@/types/orchestrator';
 
+function parseMaybeJson(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const raw = value.trim();
+  if (!raw) return value;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return value;
+  }
+}
+
+function normalizeToolOutput(output: unknown): unknown {
+  if (!output || typeof output !== 'object') return output;
+  const obj = output as Record<string, unknown>;
+  const content = obj.content;
+  if (!Array.isArray(content)) return output;
+  const normalized = content.map((item) => {
+    if (!item || typeof item !== 'object') return item;
+    const row = item as Record<string, unknown>;
+    if (typeof row.text !== 'string') return item;
+    return { ...row, text: parseMaybeJson(row.text) };
+  });
+  return { ...obj, content: normalized };
+}
+
+function normalizeExecutionResult(value: unknown): unknown {
+  if (!value || typeof value !== 'object') return value;
+  const result = value as Record<string, unknown>;
+  const next: Record<string, unknown> = { ...result };
+  if (next.output !== undefined) {
+    next.output = normalizeToolOutput(next.output);
+  }
+  if (Array.isArray(next.trace)) {
+    next.trace = next.trace.map((step) => {
+      if (!step || typeof step !== 'object') return step;
+      const row = step as Record<string, unknown>;
+      if (row.output === undefined) return step;
+      return { ...row, output: normalizeToolOutput(row.output) };
+    });
+  }
+  if (Array.isArray(next.steps)) {
+    next.steps = next.steps.map((step) => {
+      if (!step || typeof step !== 'object') return step;
+      const row = step as Record<string, unknown>;
+      if (row.output === undefined) return step;
+      return { ...row, output: normalizeToolOutput(row.output) };
+    });
+  }
+  return next;
+}
+
 const ExecutePageInner = () => {
   const { message } = App.useApp();
   const searchParams = useSearchParams();
@@ -22,7 +73,7 @@ const ExecutePageInner = () => {
   );
   const [definitionId, setDefinitionId] = useState(definitionIdFromQuery);
   const [flowText, setFlowText] = useState(`{
-  "version": "v1",
+  "version": "flow/v1",
   "id": "debug-flow",
   "name": "调试",
   "nodes": [],
@@ -56,7 +107,7 @@ const ExecutePageInner = () => {
           flowDefinitionId: definitionId.trim(),
           input,
         });
-        setResult(res as Record<string, unknown>);
+        setResult(normalizeExecutionResult(res) as Record<string, unknown>);
         message.success('执行完成');
         return;
       }
@@ -73,7 +124,7 @@ const ExecutePageInner = () => {
         flow: normalized,
         input,
       });
-      setResult(res as Record<string, unknown>);
+      setResult(normalizeExecutionResult(res) as Record<string, unknown>);
       message.success('执行完成');
     } catch {
       /* request */

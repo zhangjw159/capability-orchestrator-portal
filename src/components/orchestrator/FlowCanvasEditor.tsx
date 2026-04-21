@@ -47,6 +47,104 @@ type Props = {
   onSaved?: () => void;
 };
 
+function buildArgsTemplateFromSchema(schema: unknown): Record<string, unknown> {
+  if (!schema || typeof schema !== 'object') return {};
+  const obj = schema as { properties?: Record<string, unknown> };
+  const properties = obj.properties;
+  if (!properties || typeof properties !== 'object') return {};
+  return Object.keys(properties).reduce<Record<string, unknown>>((acc, key) => {
+    const fieldSchema = properties[key] as Record<string, unknown> | undefined;
+    const fieldType = String(fieldSchema?.type ?? '');
+    if (fieldType === 'string') {
+      acc[key] = `{{index .input "${key}"}}`;
+    } else if (fieldType === 'integer' || fieldType === 'number') {
+      acc[key] = 0;
+    } else if (fieldType === 'boolean') {
+      acc[key] = false;
+    } else if (fieldType === 'array') {
+      acc[key] = [];
+    } else if (fieldType === 'object') {
+      acc[key] = {};
+    } else {
+      acc[key] = '';
+    }
+    return acc;
+  }, {});
+}
+
+function extractBodySchema(inputSchema: unknown): unknown {
+  if (!inputSchema || typeof inputSchema !== 'object') return undefined;
+  const root = inputSchema as Record<string, unknown>;
+  const properties =
+    root.properties && typeof root.properties === 'object'
+      ? (root.properties as Record<string, unknown>)
+      : undefined;
+  if (properties?.body) return properties.body;
+  if (root.bodySchema) return root.bodySchema;
+  if (root.body && typeof root.body === 'object') {
+    const body = root.body as Record<string, unknown>;
+    if (body.schema) return body.schema;
+  }
+  if (root.requestBody && typeof root.requestBody === 'object') {
+    const requestBody = root.requestBody as Record<string, unknown>;
+    if (requestBody.content && typeof requestBody.content === 'object') {
+      const content = requestBody.content as Record<string, unknown>;
+      const jsonContent = content['application/json'];
+      if (jsonContent && typeof jsonContent === 'object') {
+        const jsonObj = jsonContent as Record<string, unknown>;
+        if (jsonObj.schema) return jsonObj.schema;
+      }
+    }
+  }
+  return undefined;
+}
+
+function resolveArgsSchema(inputSchema: unknown): unknown {
+  return extractBodySchema(inputSchema) ?? inputSchema;
+}
+
+function shouldWrapBody(inputSchema: unknown): boolean {
+  if (!inputSchema || typeof inputSchema !== 'object') return false;
+  const root = inputSchema as Record<string, unknown>;
+  const properties =
+    root.properties && typeof root.properties === 'object'
+      ? (root.properties as Record<string, unknown>)
+      : undefined;
+
+  // 明确提供 body 字段时，才按 body 包裹。
+  if (properties?.body) return true;
+  if (root.bodySchema) return true;
+  if (root.body && typeof root.body === 'object') return true;
+
+  // OpenAPI 风格：仅存在 requestBody 且没有显式 query/path/params 时，按 body 包裹。
+  if (root.requestBody) {
+    const hasNonBodyHints = Boolean(
+      properties?.query ||
+        properties?.path ||
+        properties?.params ||
+        properties?.headers ||
+        properties?.header
+    );
+    return !hasNonBodyHints;
+  }
+  return false;
+}
+
+function toEditableInput(configInput: unknown, inputSchema: unknown): Record<string, unknown> {
+  if (!configInput || typeof configInput !== 'object') return {};
+  const inputRecord = configInput as Record<string, unknown>;
+  if (shouldWrapBody(inputSchema)) {
+    const body = inputRecord.body;
+    if (body && typeof body === 'object') return body as Record<string, unknown>;
+  }
+  return inputRecord;
+}
+
+function toConfigInput(editableInput: Record<string, unknown>, inputSchema: unknown): Record<string, unknown> {
+  if (shouldWrapBody(inputSchema)) return { body: editableInput };
+  return editableInput;
+}
+
 const FlowNodeCard = ({ data }: { data: { label?: string } }) => (
   <div className='rounded border border-neutral-300 bg-white px-3 py-2 text-xs shadow-sm'>
     <Handle type='target' position={Position.Top} style={{ width: 8, height: 8, background: '#1677ff' }} />
@@ -110,8 +208,12 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
   const [inputText, setInputText] = useState('{}');
   const [executeResult, setExecuteResult] = useState<unknown>(null);
   const [toolOptions, setToolOptions] = useState<
-    Array<{ value: string; label: string; server?: string; name?: string }>
+    Array<{ value: string; label: string; server?: string; name?: string; inputSchema?: unknown }>
   >([]);
+  const [toolInputText, setToolInputText] = useState('{}');
+  const [toolInputError, setToolInputError] = useState<string | null>(null);
+  const [refArgKey, setRefArgKey] = useState('');
+  const [refOutputPath, setRefOutputPath] = useState('data');
 
   useEffect(() => {
     const mapped = toCanvas(initialFlow);
@@ -133,6 +235,7 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
             label: String(tool.displayName ?? tool.name ?? tool.toolId ?? tool.id ?? ''),
             server: typeof tool.server === 'string' ? tool.server : undefined,
             name: typeof tool.name === 'string' ? tool.name : undefined,
+            inputSchema: tool.inputSchema,
           }))
         );
       } catch {
@@ -152,6 +255,28 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
     () => flowDraft.nodes.find((node) => node.id === selectedNodeId),
     [flowDraft.nodes, selectedNodeId]
   );
+  const selectedToolOption = useMemo(() => {
+    if (selectedNode?.type !== 'tool') return undefined;
+    const toolId = String((selectedNode.config?.toolId as string) ?? '');
+    if (!toolId) return undefined;
+    return toolOptions.find((tool) => tool.value === toolId);
+  }, [selectedNode, toolOptions]);
+  useEffect(() => {
+    if (selectedNode?.type !== 'tool') {
+      setToolInputText('{}');
+      setToolInputError(null);
+      return;
+    }
+    const input = selectedNode.config?.input ?? selectedNode.config?.args;
+    const editable = toEditableInput(input, selectedToolOption?.inputSchema);
+    if (editable && Object.keys(editable).length > 0) {
+      setToolInputText(JSON.stringify(editable, null, 2));
+      setToolInputError(null);
+      return;
+    }
+    setToolInputText('{}');
+    setToolInputError(null);
+  }, [selectedNode, selectedToolOption]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     setNodes((current) => applyNodeChanges(changes, current));
@@ -201,6 +326,43 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
     },
     [selectedNodeId]
   );
+
+  const handleInsertReference = useCallback(() => {
+    if (!selectedNode || selectedNode.type !== 'tool') return;
+    if (!refArgKey.trim()) {
+      message.warning('请填写目标参数名');
+      return;
+    }
+    const outputPath = refOutputPath.trim() || refArgKey.trim();
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(toolInputText) as Record<string, unknown>;
+    } catch (error) {
+      setToolInputError(`参数 JSON 无效：${error instanceof Error ? error.message : 'parse error'}`);
+      return;
+    }
+    const next = {
+      ...parsed,
+      [refArgKey.trim()]: `{{index .input "${outputPath}"}}`,
+    };
+    setToolInputText(JSON.stringify(next, null, 2));
+    setToolInputError(null);
+    updateNode({
+      config: {
+        ...(selectedNode.config ?? {}),
+        input: toConfigInput(next, selectedToolOption?.inputSchema),
+      },
+    });
+    message.success('已插入 input 引用');
+  }, [
+    message,
+    refArgKey,
+    refOutputPath,
+    selectedNode,
+    selectedToolOption,
+    toolInputText,
+    updateNode,
+  ]);
 
   const runValidate = useCallback(async () => {
     const res = await validateFlow(flowDraft);
@@ -376,6 +538,9 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
                           options={toolOptions}
                           onChange={(value) => {
                             const selected = toolOptions.find((tool) => tool.value === value);
+                            const schemaTemplate = buildArgsTemplateFromSchema(
+                              resolveArgsSchema(selected?.inputSchema)
+                            );
                             updateNode({
                               config: {
                                 ...(selectedNode.config ?? {}),
@@ -383,8 +548,16 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
                                 ...(selected?.server ? { server: selected.server } : {}),
                                 ...(selected?.name ? { name: selected.name } : {}),
                                 ...(selected?.name ? { tool: selected.name } : {}),
+                                input:
+                                  selectedNode.config?.input &&
+                                  typeof selectedNode.config.input === 'object' &&
+                                  Object.keys(selectedNode.config.input as Record<string, unknown>).length > 0
+                                    ? selectedNode.config.input
+                                    : toConfigInput(schemaTemplate, selected?.inputSchema),
                               },
                             });
+                            setToolInputText(JSON.stringify(schemaTemplate, null, 2));
+                            setToolInputError(null);
                           }}
                         />
                       </Form.Item>
@@ -397,6 +570,74 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
                             })
                           }
                         />
+                      </Form.Item>
+                      <Form.Item label="input(JSON)">
+                        <TextArea
+                          rows={8}
+                          value={toolInputText}
+                          onChange={(e) => {
+                            const next = e.target.value;
+                            setToolInputText(next);
+                            try {
+                              const parsed = JSON.parse(next) as Record<string, unknown>;
+                              setToolInputError(null);
+                              updateNode({
+                                config: {
+                                  ...(selectedNode.config ?? {}),
+                                  input: toConfigInput(parsed, selectedToolOption?.inputSchema),
+                                },
+                              });
+                            } catch (error) {
+                              setToolInputError(
+                                `参数 JSON 无效：${error instanceof Error ? error.message : 'parse error'}`
+                              );
+                            }
+                          }}
+                          placeholder='根据所选工具 inputSchema 填写，例如 {"search_value":"{{index .input \"search_value\"}}"}'
+                        />
+                        {toolInputError ? (
+                          <div className="mt-1 text-xs text-red-500">{toolInputError}</div>
+                        ) : selectedToolOption?.inputSchema ? (
+                          <div className="mt-1 text-xs text-neutral-500">
+                            已按 body schema（若存在）/inputSchema 生成参数模板。
+                          </div>
+                        ) : (
+                          <div className="mt-1 text-xs text-neutral-500">该工具未提供 inputSchema，手动填写参数。</div>
+                        )}
+                        {selectedToolOption?.inputSchema ? (
+                          <pre className="mt-2 max-h-32 overflow-auto rounded bg-neutral-50 p-2 text-xs">
+                            {JSON.stringify(extractBodySchema(selectedToolOption.inputSchema) ?? '该工具未提供 body schema', null, 2)}
+                          </pre>
+                        ) : null}
+                      </Form.Item>
+                      <Form.Item label="output">
+                        <Input
+                          value={String((selectedNode.config?.output as string) ?? '')}
+                          onChange={(e) =>
+                            updateNode({
+                              config: { ...(selectedNode.config ?? {}), output: e.target.value },
+                            })
+                          }
+                          placeholder="例如 profile"
+                        />
+                      </Form.Item>
+                      <Form.Item label="从指定 tool output 引用">
+                        <div className="flex flex-col gap-2">
+                          <Input
+                            value={refArgKey}
+                            onChange={(e) => setRefArgKey(e.target.value)}
+                            placeholder="目标参数名，例如 userId"
+                          />
+                          <Input
+                            value={refOutputPath}
+                            onChange={(e) => setRefOutputPath(e.target.value)}
+                            placeholder='input 键名，例如 search_value（默认同参数名）'
+                          />
+                          <Button onClick={handleInsertReference}>插入到 input</Button>
+                          <div className="text-xs text-neutral-500">
+                            引用格式：{'{{index .input "search_value"}}'}
+                          </div>
+                        </div>
                       </Form.Item>
                     </>
                   )}

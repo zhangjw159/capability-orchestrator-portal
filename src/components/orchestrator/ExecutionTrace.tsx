@@ -8,6 +8,31 @@ type ExecutionTraceProps = {
   steps?: Array<Record<string, unknown>>;
 };
 
+function parseMaybeJson(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const raw = value.trim();
+  if (!raw) return value;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return value;
+  }
+}
+
+function normalizeToolOutput(output: unknown): unknown {
+  if (!output || typeof output !== 'object') return output;
+  const obj = output as Record<string, unknown>;
+  const content = obj.content;
+  if (!Array.isArray(content)) return output;
+  const normalized = content.map((item) => {
+    if (!item || typeof item !== 'object') return item;
+    const row = item as Record<string, unknown>;
+    if (typeof row.text !== 'string') return item;
+    return { ...row, text: parseMaybeJson(row.text) };
+  });
+  return { ...obj, content: normalized };
+}
+
 function safeJson(value: unknown): string {
   try {
     return JSON.stringify(value, null, 2);
@@ -69,7 +94,7 @@ const ExecutionTrace: React.FC<ExecutionTraceProps> = ({ trace, steps }) => {
                     {s.output !== undefined ? (
                       <Descriptions.Item label="输出">
                         <pre className="max-h-40 overflow-auto text-xs">
-                          {safeJson(s.output)}
+                          {safeJson(normalizeToolOutput(s.output))}
                         </pre>
                       </Descriptions.Item>
                     ) : null}
