@@ -45,7 +45,60 @@ type Props = {
   skills: OrchestratorSkill[];
   readonlyFlowId?: boolean;
   onSaved?: () => void;
+  onReloadDefinitionDsl?: () => Promise<Flow | null>;
 };
+
+const DEFAULT_FLOW_VERSION = 'flow/v1';
+
+function buildDefaultNodeConfig(type: FlowNodeType, nodeId: string): Record<string, unknown> {
+  if (type === 'tool') {
+    return {
+      toolId: '',
+      input: {},
+      output: `${nodeId}_result`,
+    };
+  }
+  if (type === 'template') {
+    return {
+      output: `${nodeId}_output`,
+      template: '{{.input}}',
+    };
+  }
+  if (type === 'model') {
+    return {
+      meta: {
+        model: 'deepseek-chat',
+        temperature: 0.2,
+      },
+      input: {},
+      output: `${nodeId}_analysis`,
+      prompt: '',
+    };
+  }
+  if (type === 'set') {
+    return {
+      output: `${nodeId}_value`,
+      value: '',
+    };
+  }
+  return {};
+}
+
+function normalizeEditorFlow(flow: Flow): Flow {
+  const rawVersion = String(flow.version ?? '').trim();
+  const normalizedVersion =
+    !rawVersion || rawVersion === '1' || rawVersion === '1.0' || rawVersion === 'v1'
+      ? DEFAULT_FLOW_VERSION
+      : rawVersion;
+  return {
+    ...flow,
+    version: normalizedVersion,
+    input:
+      flow.input && typeof flow.input === 'object' && !Array.isArray(flow.input)
+        ? flow.input
+        : { output: {} },
+  };
+}
 
 function buildArgsTemplateFromSchema(schema: unknown): Record<string, unknown> {
   if (!schema || typeof schema !== 'object') return {};
@@ -103,45 +156,12 @@ function resolveArgsSchema(inputSchema: unknown): unknown {
   return extractBodySchema(inputSchema) ?? inputSchema;
 }
 
-function shouldWrapBody(inputSchema: unknown): boolean {
-  if (!inputSchema || typeof inputSchema !== 'object') return false;
-  const root = inputSchema as Record<string, unknown>;
-  const properties =
-    root.properties && typeof root.properties === 'object'
-      ? (root.properties as Record<string, unknown>)
-      : undefined;
-
-  // 明确提供 body 字段时，才按 body 包裹。
-  if (properties?.body) return true;
-  if (root.bodySchema) return true;
-  if (root.body && typeof root.body === 'object') return true;
-
-  // OpenAPI 风格：仅存在 requestBody 且没有显式 query/path/params 时，按 body 包裹。
-  if (root.requestBody) {
-    const hasNonBodyHints = Boolean(
-      properties?.query ||
-        properties?.path ||
-        properties?.params ||
-        properties?.headers ||
-        properties?.header
-    );
-    return !hasNonBodyHints;
-  }
-  return false;
-}
-
-function toEditableInput(configInput: unknown, inputSchema: unknown): Record<string, unknown> {
+function toEditableInput(configInput: unknown, _inputSchema: unknown): Record<string, unknown> {
   if (!configInput || typeof configInput !== 'object') return {};
-  const inputRecord = configInput as Record<string, unknown>;
-  if (shouldWrapBody(inputSchema)) {
-    const body = inputRecord.body;
-    if (body && typeof body === 'object') return body as Record<string, unknown>;
-  }
-  return inputRecord;
+  return configInput as Record<string, unknown>;
 }
 
-function toConfigInput(editableInput: Record<string, unknown>, inputSchema: unknown): Record<string, unknown> {
-  if (shouldWrapBody(inputSchema)) return { body: editableInput };
+function toConfigInput(editableInput: Record<string, unknown>, _inputSchema: unknown): Record<string, unknown> {
   return editableInput;
 }
 
@@ -166,8 +186,12 @@ function toCanvas(flow: Flow): { nodes: Node[]; edges: Edge[] } {
   }));
   const edges: Edge[] = (flow.edges ?? []).map((edge) => ({
     id: edge.id || uuidv4(),
-    source: edge.source,
-    target: edge.target,
+    source: (edge as { source?: string; from?: string }).source ?? (edge as { from?: string }).from ?? '',
+    target: (edge as { target?: string; to?: string }).target ?? (edge as { to?: string }).to ?? '',
+    label: (edge as { label?: string }).label,
+    data: {
+      rawEdge: edge,
+    },
     markerEnd: { type: MarkerType.ArrowClosed },
   }));
   return { nodes, edges };
@@ -176,7 +200,7 @@ function toCanvas(flow: Flow): { nodes: Node[]; edges: Edge[] } {
 function toFlow(base: Flow, nodes: Node[], edges: Edge[]): Flow {
   const nodeMap = new Map(base.nodes.map((node) => [node.id, node]));
   return {
-    ...base,
+    ...normalizeEditorFlow(base),
     nodes: nodes.map((node) => {
       const original = nodeMap.get(node.id);
       return {
@@ -187,21 +211,98 @@ function toFlow(base: Flow, nodes: Node[], edges: Edge[]): Flow {
         config: original?.config ?? {},
       };
     }),
-    edges: edges.map((edge) => ({
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
-    })),
+    edges: edges.map((edge) => {
+      const raw =
+        edge.data && typeof edge.data === 'object' && 'rawEdge' in (edge.data as Record<string, unknown>)
+          ? ((edge.data as Record<string, unknown>).rawEdge as Record<string, unknown>)
+          : {};
+      const next: Record<string, unknown> = {
+        ...raw,
+        from: edge.source,
+        to: edge.target,
+      };
+      if (typeof edge.label === 'string' && edge.label.trim()) {
+        next.label = edge.label;
+      } else {
+        delete next.label;
+      }
+      delete next.source;
+      delete next.target;
+      return next as unknown as Flow['edges'][number];
+    }),
   };
 }
 
-const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, onSaved }: Props) => {
+function normalizeConfirmEdgeLabels(
+  inputEdges: Edge[],
+  flowNodes: Array<{ id: string; type: FlowNodeType }>
+): Edge[] {
+  const confirmNodeIdSet = new Set(
+    flowNodes.filter((node) => node.type === 'confirm').map((node) => node.id)
+  );
+  const grouped = new Map<string, Edge[]>();
+  for (const edge of inputEdges) {
+    if (!confirmNodeIdSet.has(edge.source)) continue;
+    if (!grouped.has(edge.source)) grouped.set(edge.source, []);
+    grouped.get(edge.source)?.push(edge);
+  }
+
+  const labeled = [...inputEdges];
+  for (const [sourceId, outgoingEdges] of grouped.entries()) {
+    const toCanonicalConfirmLabel = (label: unknown): 'true' | 'false' | undefined => {
+      if (label === true) return 'true';
+      if (label === false) return 'false';
+      if (typeof label !== 'string') return undefined;
+      const normalized = label.trim().toLowerCase();
+      if (normalized === 'true') return 'true';
+      if (normalized === 'false') return 'false';
+      return undefined;
+    };
+
+    const normalizedForNode = outgoingEdges.map((edge) => {
+      const canonical = toCanonicalConfirmLabel(edge.label);
+      if (canonical) return { ...edge, label: canonical };
+      return edge;
+    });
+    const hasTrue = normalizedForNode.some((edge) => edge.label === 'true');
+    const hasFalse = normalizedForNode.some((edge) => edge.label === 'false');
+    const missing = normalizedForNode.filter((edge) => edge.label !== 'true' && edge.label !== 'false');
+
+    const assignQueue: string[] = [];
+    if (!hasTrue) assignQueue.push('true');
+    if (!hasFalse) assignQueue.push('false');
+
+    const replaced = normalizedForNode.map((edge) => {
+      if (edge.label === 'true' || edge.label === 'false') return edge;
+      const nextLabel = assignQueue.shift();
+      return nextLabel ? { ...edge, label: nextLabel } : edge;
+    });
+
+    for (const edge of replaced) {
+      const index = labeled.findIndex((item) => item.id === edge.id);
+      if (index >= 0) labeled[index] = edge;
+    }
+    void sourceId;
+    void missing;
+  }
+  return labeled;
+}
+
+const FlowCanvasEditor = ({
+  definitionId,
+  initialFlow,
+  skills,
+  readonlyFlowId,
+  onSaved,
+  onReloadDefinitionDsl,
+}: Props) => {
   const { message } = App.useApp();
   const router = useRouter();
   const [flowDraft, setFlowDraft] = useState<Flow>(initialFlow);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string>();
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string>();
   const [validateIssues, setValidateIssues] = useState<ValidationIssue[]>([]);
   const [saving, setSaving] = useState(false);
   const [executing, setExecuting] = useState(false);
@@ -214,12 +315,14 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
   const [toolInputError, setToolInputError] = useState<string | null>(null);
   const [refArgKey, setRefArgKey] = useState('');
   const [refOutputPath, setRefOutputPath] = useState('data');
+  const [dslImportText, setDslImportText] = useState('');
 
   useEffect(() => {
-    const mapped = toCanvas(initialFlow);
-    setFlowDraft(initialFlow);
+    const normalizedInitial = normalizeEditorFlow(initialFlow);
+    const mapped = toCanvas(normalizedInitial);
+    setFlowDraft(normalizedInitial);
     setNodes(mapped.nodes);
-    setEdges(mapped.edges);
+    setEdges(normalizeConfirmEdgeLabels(mapped.edges, normalizedInitial.nodes));
   }, [initialFlow]);
 
   useEffect(() => {
@@ -255,6 +358,10 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
     () => flowDraft.nodes.find((node) => node.id === selectedNodeId),
     [flowDraft.nodes, selectedNodeId]
   );
+  const selectedEdge = useMemo(
+    () => edges.find((edge) => edge.id === selectedEdgeId),
+    [edges, selectedEdgeId]
+  );
   const selectedToolOption = useMemo(() => {
     if (selectedNode?.type !== 'tool') return undefined;
     const toolId = String((selectedNode.config?.toolId as string) ?? '');
@@ -281,14 +388,23 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     setNodes((current) => applyNodeChanges(changes, current));
   }, []);
-  const onEdgesChange = useCallback((changes: EdgeChange[]) => {
-    setEdges((current) => applyEdgeChanges(changes, current));
-  }, []);
-  const onConnect = useCallback((connection: Edge | Connection) => {
-    setEdges((current) =>
-      addEdge({ ...connection, id: uuidv4(), markerEnd: { type: MarkerType.ArrowClosed } }, current)
-    );
-  }, []);
+  const onEdgesChange = useCallback(
+    (changes: EdgeChange[]) => {
+      setEdges((current) => normalizeConfirmEdgeLabels(applyEdgeChanges(changes, current), flowDraft.nodes));
+    },
+    [flowDraft.nodes]
+  );
+  const onConnect = useCallback(
+    (connection: Edge | Connection) => {
+      setEdges((current) =>
+        normalizeConfirmEdgeLabels(
+          addEdge({ ...connection, id: uuidv4(), markerEnd: { type: MarkerType.ArrowClosed } }, current),
+          flowDraft.nodes
+        )
+      );
+    },
+    [flowDraft.nodes]
+  );
 
   const handleAddNode = useCallback(
     (type: FlowNodeType) => {
@@ -302,7 +418,10 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
       setNodes((current) => [...current, nextNode]);
       setFlowDraft((prev) => ({
         ...prev,
-        nodes: [...prev.nodes, { id, type, name: `${type}-${id}`, config: {} }],
+        nodes: [
+          ...prev.nodes,
+          { id, type, name: `${type}-${id}`, config: buildDefaultNodeConfig(type, id) },
+        ],
       }));
       setSelectedNodeId(id);
     },
@@ -379,14 +498,21 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
   const handleSave = useCallback(async () => {
     setSaving(true);
     try {
-      const validation = await runValidate();
+      // 保存前再次强规范 confirm 分支，避免 true/false 因空格或大小写导致执行期不匹配
+      const normalizedEdges = normalizeConfirmEdgeLabels(edges, flowDraft.nodes);
+      const normalizedFlow = toFlow(flowDraft, nodes, normalizedEdges);
+      setEdges(normalizedEdges);
+      setFlowDraft(normalizedFlow);
+      const validation = await validateFlow(normalizedFlow);
+      const issues = [...(validation.errorIssues ?? []), ...(validation.warningIssues ?? [])];
+      setValidateIssues(issues);
       if (validation.valid === false) return;
       await saveDefinition({
         definitionId,
         id: definitionId,
-        name: flowDraft.name,
-        flowId: flowDraft.id,
-        dsl: flowDraft,
+        name: normalizedFlow.name,
+        flowId: normalizedFlow.id,
+        dsl: normalizedFlow,
       });
       message.success('保存成功');
       onSaved?.();
@@ -394,7 +520,7 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
     } finally {
       setSaving(false);
     }
-  }, [definitionId, flowDraft, message, onSaved, router, runValidate]);
+  }, [definitionId, edges, flowDraft, message, nodes, onSaved, router]);
 
   const handleValidateAndExecute = useCallback(async () => {
     setExecuting(true);
@@ -432,9 +558,54 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
         markerEnd: { type: MarkerType.ArrowClosed },
       });
     }
-    setEdges(generated);
+    setEdges(normalizeConfirmEdgeLabels(generated, flowDraft.nodes));
     message.success('已按节点顺序自动连线');
-  }, [message, nodes]);
+  }, [flowDraft.nodes, message, nodes]);
+
+  const handleImportDsl = useCallback(() => {
+    if (!dslImportText.trim()) {
+      message.warning('请先粘贴 DSL JSON');
+      return;
+    }
+    try {
+      const parsed = JSON.parse(dslImportText) as Flow;
+      if (!parsed || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
+        message.error('DSL 需包含 nodes 与 edges 数组');
+        return;
+      }
+      const normalized = normalizeEditorFlow(parsed);
+      const mapped = toCanvas(normalized);
+      setFlowDraft(normalized);
+      setNodes(mapped.nodes);
+      setEdges(normalizeConfirmEdgeLabels(mapped.edges, normalized.nodes));
+      setSelectedNodeId(undefined);
+      setSelectedEdgeId(undefined);
+      message.success('已根据 DSL 自动生成画板元素');
+    } catch (error) {
+      message.error(`DSL JSON 解析失败：${error instanceof Error ? error.message : 'parse error'}`);
+    }
+  }, [dslImportText, message]);
+
+  const handleReloadDefinitionDsl = useCallback(async () => {
+    if (!onReloadDefinitionDsl) return;
+    try {
+      const latest = await onReloadDefinitionDsl();
+      if (!latest) {
+        message.warning('未获取到可用 DSL');
+        return;
+      }
+      const normalized = normalizeEditorFlow(latest);
+      const mapped = toCanvas(normalized);
+      setFlowDraft(normalized);
+      setNodes(mapped.nodes);
+      setEdges(normalizeConfirmEdgeLabels(mapped.edges, normalized.nodes));
+      setSelectedNodeId(undefined);
+      setSelectedEdgeId(undefined);
+      message.success('已从当前定义重新加载 DSL');
+    } catch {
+      message.error('重新加载 DSL 失败');
+    }
+  }, [message, onReloadDefinitionDsl]);
 
   const issueNodeIdSet = useMemo(
     () => new Set(validateIssues.map((issue) => issue.nodeId).filter(Boolean)),
@@ -467,7 +638,18 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
-              onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+              onNodeClick={(_, node) => {
+                setSelectedNodeId(node.id);
+                setSelectedEdgeId(undefined);
+              }}
+              onEdgeClick={(_, edge) => {
+                setSelectedEdgeId(edge.id);
+                setSelectedNodeId(undefined);
+              }}
+              onPaneClick={() => {
+                setSelectedNodeId(undefined);
+                setSelectedEdgeId(undefined);
+              }}
               fitView
             >
               <MiniMap />
@@ -545,9 +727,6 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
                               config: {
                                 ...(selectedNode.config ?? {}),
                                 toolId: value,
-                                ...(selected?.server ? { server: selected.server } : {}),
-                                ...(selected?.name ? { name: selected.name } : {}),
-                                ...(selected?.name ? { tool: selected.name } : {}),
                                 input:
                                   selectedNode.config?.input &&
                                   typeof selectedNode.config.input === 'object' &&
@@ -643,9 +822,126 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
                   )}
                 </>
               ) : null}
+              {selectedNode.type === 'template' ? (
+                <>
+                  <Form.Item label="template">
+                    <TextArea
+                      rows={4}
+                      value={String((selectedNode.config?.template as string) ?? '')}
+                      onChange={(e) =>
+                        updateNode({
+                          config: { ...(selectedNode.config ?? {}), template: e.target.value },
+                        })
+                      }
+                      placeholder='例如 {{index .driver_list.list 0 "id"}}'
+                    />
+                  </Form.Item>
+                  <Form.Item label="output">
+                    <Input
+                      value={String((selectedNode.config?.output as string) ?? '')}
+                      onChange={(e) =>
+                        updateNode({
+                          config: { ...(selectedNode.config ?? {}), output: e.target.value },
+                        })
+                      }
+                      placeholder='例如 driver_id 或 output.summary'
+                    />
+                  </Form.Item>
+                </>
+              ) : null}
+              {selectedNode.type === 'model' ? (
+                <>
+                  <Form.Item label="meta.model">
+                    <Input
+                      value={String((selectedNode.config?.meta as Record<string, unknown> | undefined)?.model ?? '')}
+                      onChange={(e) =>
+                        updateNode({
+                          config: {
+                            ...(selectedNode.config ?? {}),
+                            meta: {
+                              ...((selectedNode.config?.meta as Record<string, unknown>) ?? {}),
+                              model: e.target.value,
+                            },
+                          },
+                        })
+                      }
+                      placeholder='例如 deepseek-chat'
+                    />
+                  </Form.Item>
+                  <Form.Item label="meta.temperature">
+                    <Input
+                      value={String(
+                        (selectedNode.config?.meta as Record<string, unknown> | undefined)?.temperature ?? ''
+                      )}
+                      onChange={(e) =>
+                        updateNode({
+                          config: {
+                            ...(selectedNode.config ?? {}),
+                            meta: {
+                              ...((selectedNode.config?.meta as Record<string, unknown>) ?? {}),
+                              temperature: Number(e.target.value || 0),
+                            },
+                          },
+                        })
+                      }
+                      placeholder='例如 0.2'
+                    />
+                  </Form.Item>
+                  <Form.Item label="prompt">
+                    <TextArea
+                      rows={6}
+                      value={String((selectedNode.config?.prompt as string) ?? '')}
+                      onChange={(e) =>
+                        updateNode({
+                          config: { ...(selectedNode.config ?? {}), prompt: e.target.value },
+                        })
+                      }
+                    />
+                  </Form.Item>
+                  <Form.Item label="output">
+                    <Input
+                      value={String((selectedNode.config?.output as string) ?? '')}
+                      onChange={(e) =>
+                        updateNode({
+                          config: { ...(selectedNode.config ?? {}), output: e.target.value },
+                        })
+                      }
+                      placeholder='例如 analysis'
+                    />
+                  </Form.Item>
+                </>
+              ) : null}
+            </Form>
+          ) : selectedEdge ? (
+            <Form layout="vertical">
+              <Form.Item label="边 ID">
+                <Input value={selectedEdge.id} disabled />
+              </Form.Item>
+              <Form.Item label="from">
+                <Input value={selectedEdge.source} disabled />
+              </Form.Item>
+              <Form.Item label="to">
+                <Input value={selectedEdge.target} disabled />
+              </Form.Item>
+              <Form.Item label="label">
+                <Input
+                  value={typeof selectedEdge.label === 'string' ? selectedEdge.label : ''}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setEdges((current) =>
+                      current.map((edge) =>
+                        edge.id === selectedEdge.id
+                          ? { ...edge, label: value || undefined }
+                          : edge
+                      )
+                    );
+                  }}
+                  placeholder='例如 true / false'
+                />
+              </Form.Item>
             </Form>
           ) : (
-            <div className="text-neutral-500">请先选择一个节点</div>
+            <div className="text-neutral-500">请先选择一个节点或一条边</div>
           )}
         </Card>
       </div>
@@ -661,6 +957,9 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
                 <Space wrap>
                   <Button onClick={runValidate}>校验</Button>
                   <Button onClick={handleAutoConnect}>一键自动连线</Button>
+                  {onReloadDefinitionDsl ? (
+                    <Button onClick={handleReloadDefinitionDsl}>从当前定义重新加载 DSL</Button>
+                  ) : null}
                   <Button type="primary" loading={saving} onClick={handleSave}>
                     保存草稿
                   </Button>
@@ -685,6 +984,15 @@ const FlowCanvasEditor = ({ definitionId, initialFlow, skills, readonlyFlowId, o
                   onChange={(e) => setInputText(e.target.value)}
                   placeholder="执行 input JSON"
                 />
+                <TextArea
+                  rows={8}
+                  value={dslImportText}
+                  onChange={(e) => setDslImportText(e.target.value)}
+                  placeholder='粘贴完整 DSL JSON，点击“从 DSL 生成画板”'
+                />
+                <Space>
+                  <Button onClick={handleImportDsl}>从 DSL 生成画板</Button>
+                </Space>
                 {validateIssues.length > 0 ? (
                   <div className="flex flex-wrap gap-2">
                     {validateIssues.map((issue) => (

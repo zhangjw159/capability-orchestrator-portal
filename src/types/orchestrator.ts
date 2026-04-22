@@ -10,8 +10,10 @@ export type FlowNodeType =
 
 export interface FlowEdge {
   id: string;
-  source: string;
-  target: string;
+  source?: string;
+  target?: string;
+  from?: string;
+  to?: string;
   sourceHandle?: string;
   targetHandle?: string;
 }

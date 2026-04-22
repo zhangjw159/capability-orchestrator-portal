@@ -4,7 +4,7 @@ import { PageContainer } from '@ant-design/pro-components';
 import { App, Button } from 'antd';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { getDefinition, listSkills } from '@/api/orchestrator';
 import FlowCanvasEditor from '@/components/orchestrator/FlowCanvasEditor';
@@ -32,9 +32,12 @@ const EditFlowPage = () => {
           if (parsed) setFlow(parsed);
           else {
             setFlow({
-              version: 'v1',
+              version: 'flow/v1',
               id: detail.flowId || `flow-${definitionId}`,
               name: detail.name || '未命名流程',
+              input: {
+                output: {},
+              },
               nodes: [],
               edges: [],
             });
@@ -51,6 +54,23 @@ const EditFlowPage = () => {
     };
   }, [definitionId, message]);
 
+  const handleReloadDefinitionDsl = useCallback(async (): Promise<Flow | null> => {
+    if (!definitionId) return null;
+    const detail = await getDefinition(definitionId);
+    const parsed = parseFlowDsl(detail.dsl);
+    if (parsed) return parsed;
+    return {
+      version: 'flow/v1',
+      id: detail.flowId || `flow-${definitionId}`,
+      name: detail.name || '未命名流程',
+      input: {
+        output: {},
+      },
+      nodes: [],
+      edges: [],
+    };
+  }, [definitionId]);
+
   return (
     <PageContainer
       title={`编辑流程 ${definitionId}`}
@@ -64,7 +84,14 @@ const EditFlowPage = () => {
         </Link>,
       ]}
     >
-      {flow ? <FlowCanvasEditor definitionId={definitionId} initialFlow={flow} skills={skills} /> : null}
+      {flow ? (
+        <FlowCanvasEditor
+          definitionId={definitionId}
+          initialFlow={flow}
+          skills={skills}
+          onReloadDefinitionDsl={handleReloadDefinitionDsl}
+        />
+      ) : null}
     </PageContainer>
   );
 };

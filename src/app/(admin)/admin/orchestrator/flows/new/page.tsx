@@ -15,6 +15,9 @@ const defaultFlowText = `{
   "version": "flow/v1",
   "id": "my-flow",
   "name": "新流程",
+  "input": {
+    "output": {}
+  },
   "nodes": [],
   "edges": []
 }`;
