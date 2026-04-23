@@ -385,3 +385,377 @@ src/
 10. M4-2：执行历史与详情联动  
 11. M4-3：错误上下文复制与排障体验优化
 
+## 13. 最新执行方案（对齐当前后端架构）
+
+本节为当前版本的主执行方案，与既有章节并行，但实现优先级以本节为准。
+
+### 13.1 基线与边界
+
+- 执行架构：Temporal-only（父 workflow + 每节点 child workflow + node activity）
+- AI 规划入口：`POST /api/v1/orchestrator/flows/plan`
+- 规划返回结构：`PlanResult = { flow, validation }`（`validation` 来源于 LangGraph）
+- 规划失败语义：
+  - `400 + PlanResult`：语义失败（`validation.valid=false`，但通常有可用 `flow`）
+  - `400 + {error,message}`：系统失败（planner 调用失败/解析失败）
+
+### 13.2 目标闭环（产品主链路）
+
+构建“AI 初稿 -> 人工修订 -> 执行观测 -> 回流重试”的稳定闭环：
+
+1. 用户输入 `goal/context/constraints`
+2. 前端调用 `flows/plan` 获取 `flow + validation`
+3. 将 `flow` 应用到画布/JSON 编辑器
+4. 保存草稿并发布
+5. 触发执行并查看 trace
+6. 基于错误定位回到节点修订并重试
+
+### 13.3 API 对接矩阵（按能力分组）
+
+#### A. 规划与编排
+
+- `POST /api/v1/orchestrator/flows/plan`
+- `POST /api/v1/orchestrator/flows/validate`（兜底校验）
+- `POST /api/v1/orchestrator/flows/execute`
+
+#### B. 定义管理
+
+- `GET /api/v1/orchestrator/definitions`
+- `POST /api/v1/orchestrator/definitions`
+- `GET /api/v1/orchestrator/definitions/:definitionId`
+- `POST /api/v1/orchestrator/definitions/:definitionId/publish`
+- `GET /api/v1/orchestrator/templates/default`
+- `POST /api/v1/orchestrator/definitions/from-template`
+
+#### C. 执行观测
+
+- `GET /api/v1/orchestrator/executions`
+- `GET /api/v1/orchestrator/executions/:executionId`
+
+#### D. Tool / Skill
+
+- `GET /api/v1/orchestrator/tools`
+- `POST /api/v1/orchestrator/tools/refresh`
+- `GET /api/v1/orchestrator/skills`
+- `POST /api/v1/orchestrator/skills`
+- `PUT /api/v1/orchestrator/skills/:skillId`
+- `POST /api/v1/orchestrator/skills/:skillId/status`
+- `POST /api/v1/orchestrator/skills/reload`
+
+### 13.4 前端类型与容错策略（建议直接落地）
+
+```ts
+type PlanInput = {
+  goal: string
+  context?: Record<string, any>
+  constraints?: Record<string, any>
+}
+
+type PlanResult = {
+  flow: Flow
+  validation?: {
+    valid?: boolean | string | number
+    errors?: any[]
+    warnings?: any[]
+    [k: string]: any
+  }
+}
+```
+
+建议新增统一解析函数 `isValidationValid(raw): boolean`，对 `boolean/string/number` 做标准化，避免前后端语义偏差。
+
+### 13.5 页面与交互变更（在现有编辑页增量）
+
+在现有流程编辑页新增“AI 规划入口”（独立页或抽屉均可）：
+
+- 输入区：`goal/context/constraints`
+- 操作区：`生成 Flow`
+- 结果区：
+  - Flow 摘要（节点数、边数、关键节点）
+  - Validation 摘要（`valid/errors/warnings`）
+- 决策区：
+  - `valid=true`：允许“应用到画布”
+  - `valid=false`：展示错误，并提供“仍应用后手工修复 / 返回重试”
+
+### 13.6 状态管理建议（Zustand）
+
+新增状态：
+
+- `planInput`
+- `planResult`
+- `planStatus`（idle/loading/success/error）
+- `validationSource`（`langgraph` / `backend-validate`）
+
+保留并强调：
+
+- `flowDraft`：唯一真相（single source of truth）
+- `reactFlowNodes/reactFlowEdges`：由 `flowDraft` 派生，不单独持久化
+- `executionResult`、`trace`
+
+### 13.7 实施排期（执行版）
+
+#### M1（1~1.5 周）：AI 规划闭环 MVP
+
+- 接入 `flows/plan`
+- 新增计划输入面板
+- 处理三类返回：`200` / `400+PlanResult` / `400+error`
+- 一键应用 `flow` 到编辑器
+
+验收：用户可从自然语言生成 flow 并进入编辑。
+
+#### M2（1.5~2 周）：画布强一致
+
+- 完善 React Flow 编辑能力
+- DSL <-> 画布双向同步
+- 规划结果差异高亮（新增/删除/修改节点与边）
+
+验收：规划后可视化修订、保存、刷新后保持一致。
+
+#### M3（1 周）：执行观测强化
+
+- 执行调试面板
+- trace 时间线（status/error/input/output）
+- 失败定位并一跳返回编辑节点
+
+验收：失败可在一次跳转内定位问题节点并重试。
+
+#### M4（1 周）：Skill/Tool 联动
+
+- Skill CRUD + status + reload
+- Tool 节点 skill 绑定体验优化
+- “校验并执行”快捷链路
+
+验收：业务可独立维护 skill，并即时体现到执行链路。
+
+### 13.8 联调与发布清单（必过）
+
+1. `flows/plan` 三类场景联调：
+   - `200 + valid=true`
+   - `400 + valid=false + flow`
+   - `400 + planner error`
+2. 主链路联调：`plan -> apply -> save/publish -> execute -> trace`
+3. 回归检查：
+   - 手工编辑流程（不走 AI）能力不回退
+   - 定义列表 / 执行详情 / 工具管理不回退
+
+### 13.9 风险与规避
+
+- 风险：LangGraph 返回 message 文本而非 flow JSON
+  - 规避：明确提示“规划结果不可执行”，并保留原始响应用于排查
+- 风险：`validation` 字段格式不稳定
+  - 规避：统一 `isValidationValid` 解析策略（bool/string/number）
+- 风险：画布与 JSON 状态不一致
+  - 规避：坚持 `flowDraft` 为唯一真相，画布状态只做派生
+
+## 14. 路线 B（彻底）：Studio 原生实施方案
+
+本节适用于“完全按 LangGraph/LangSmith Studio 模式构建”，即前端主对象切到 LangGraph 原生模型，不再以 Flow DSL 作为编辑中心。
+
+### 14.1 架构目标
+
+- 前端主模型：`assistant / thread / run / state`
+- 后端角色：LangGraph Studio API 网关（鉴权、转发、审计）
+- 主运行链路：前端 -> `/api/v1/studio/*` -> LangGraph API
+- 现有 `orchestrator` 接口保留兼容；新功能默认走 `studio` 接口
+
+### 14.2 当前可用后端接口（已提供）
+
+网关代理接口如下：
+
+- `GET /api/v1/studio/info` -> `GET /info`
+- `POST /api/v1/studio/assistants/search` -> `POST /assistants/search`
+- `POST /api/v1/studio/runs/wait` -> `POST /runs/wait`
+- `POST /api/v1/studio/threads/search` -> `POST /threads/search`
+
+统一约定：
+
+- 请求/响应按 LangGraph 原生对象透传（map/json）
+- 网关失败返回 `502 + {error,message}`，否则透传上游 HTTP 状态
+
+### 14.3 前端信息架构（Studio 模式）
+
+建议页面：
+
+1. `Assistants`：助手列表、检索、默认 assistant 选择
+2. `StudioRun`：输入区 + 运行区（run/wait）+ 结果区
+3. `Threads`：线程检索与历史 run 浏览
+4. `RunInspector`：run 详情、状态、输出、错误
+
+说明：Flow 画布在 Route B 不再是必选项，后续可补“Graph 只读视图”作为辅助。
+
+### 14.4 前端类型建议（LangGraph 原生）
+
+```ts
+type StudioAssistant = {
+  assistant_id: string
+  graph_id: string
+  name?: string
+  metadata?: Record<string, any>
+}
+
+type StudioRunWaitRequest = {
+  assistant_id: string
+  input: Record<string, any>
+  metadata?: Record<string, any>
+  on_completion?: 'delete' | 'keep'
+}
+
+type StudioRunWaitResponse = Record<string, any>
+```
+
+### 14.5 API 与 Store 落地项
+
+在 `src/api/studio.ts` 新增：
+
+- `getStudioInfo()`
+- `searchAssistants(payload)`
+- `runWait(payload)`
+- `searchThreads(payload)`
+
+在 store 新增：
+
+- `studioStore.assistants`
+- `studioStore.selectedAssistantId`
+- `studioStore.lastRunRequest`
+- `studioStore.lastRunResponse`
+- `studioStore.threads`
+
+### 14.6 分阶段排期（Route B）
+
+#### B1（3~5 天）：Studio 网关联调
+
+- 接 `/studio/info`、`/studio/assistants/search`
+- 实现 assistant 选择器
+- 跑通最小 `run/wait`
+
+验收：前端可选择 assistant 并成功执行一次 run。
+
+#### B2（1 周）：Run/Thread 工作台
+
+- Run 请求表单（JSON 输入）
+- 结果面板（JSON Viewer + 错误提示）
+- Thread 检索与历史展示
+
+验收：可复盘最近线程与执行结果。
+
+#### B3（1 周）：体验对齐 LangSmith Studio
+
+- 左侧对象导航（assistants/threads）
+- 中间运行工作区
+- 右侧 inspector（run metadata/errors/timing）
+
+验收：交互路径接近 Studio，可支撑业务日常调试。
+
+### 14.7 与 Route A（DSL）关系
+
+- Route B 主线：Studio 原生对象优先
+- Route A（DSL）定位：兼容历史流程资产
+- 前端建议显式分区：
+  - `Studio Console`（新主线）
+  - `Legacy Flow Console`（兼容入口）
+
+目的：在迁移期避免认知混乱，保障新旧路径可并行演进。
+
+### 14.8 Runnable 节点配置规范（Studio Graph Playground）
+
+为保证前端画布与后端 LangGraph 执行器一致，`runnable` 节点统一使用如下配置约定（放在节点 `data.config`）。
+
+#### A. 通用字段（所有 runnable 建议包含）
+
+```json
+{
+  "kind": "tool | template | model | confirm",
+  "node_key": "unique_node_key",
+  "enabled": true,
+  "timeout_ms": 10000,
+  "retry": 1
+}
+```
+
+#### B. tool 节点（调用外部工具/服务）
+
+```json
+{
+  "kind": "tool",
+  "node_key": "load_driver_detail",
+  "tool_name": "load_driver_detail",
+  "input_mapping": {
+    "driver_id": "$.selected_driver_id"
+  },
+  "output_key": "driver_detail",
+  "timeout_ms": 10000,
+  "retry": 1
+}
+```
+
+#### C. template 节点（轻量数据加工）
+
+```json
+{
+  "kind": "template",
+  "node_key": "extract_driver_count",
+  "template_key": "extract_driver_count",
+  "input_mapping": {
+    "driver_list": "$.driver_list"
+  },
+  "output_key": "driver_count"
+}
+```
+
+#### D. model 节点（LLM 推理）
+
+```json
+{
+  "kind": "model",
+  "node_key": "llm_analysis",
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "prompt_template": "基于司机详情做分析：{{driver_detail}}",
+  "input_mapping": {
+    "driver_detail": "$.driver_detail"
+  },
+  "output_key": "analysis",
+  "temperature": 0.2,
+  "max_tokens": 800,
+  "timeout_ms": 20000
+}
+```
+
+#### E. confirm 节点（条件分支）
+
+```json
+{
+  "kind": "confirm",
+  "node_key": "confirm_continue",
+  "expression": "$.driver_count > 0",
+  "true_label": "true",
+  "false_label": "false"
+}
+```
+
+约束：
+
+- `confirm` 节点必须存在 `true/false` 两条分支边。
+- `__start__` 不能有入边，`__end__` 不能有出边。
+- 前后端统一 `kind/tool_name/input_mapping/output_key` 字段语义，避免“画布可配但执行器不识别”。
+
+#### F. 运行期注入约定（前端 -> LangGraph）
+
+当用户点击“注入画布并运行”时，前端在 `metadata` 中注入：
+
+```json
+{
+  "execution_source": "graph_draft",
+  "graph_draft_version": "flow/v1",
+  "graph_draft": {
+    "nodes": [],
+    "edges": []
+  }
+}
+```
+
+后端可按需选择：
+
+- 仅记录（观测用途）
+- 按草稿执行（实验模式）
+- 对比已发布 graph 与草稿差异（审计模式）
+

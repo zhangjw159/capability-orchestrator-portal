@@ -13,7 +13,10 @@ export function parseFlowDsl(dsl: unknown): Flow | null {
   return null;
 }
 
-export function normalizeList<T>(raw: unknown, keys = ['list', 'items', 'data']): T[] {
+export function normalizeList<T>(
+  raw: unknown,
+  keys = ['list', 'items', 'data']
+): T[] {
   if (Array.isArray(raw)) return raw as T[];
   if (raw && typeof raw === 'object') {
     for (const k of keys) {
@@ -55,4 +58,28 @@ export function extractToolsList(raw: unknown): RegisteredTool[] {
   }
 
   return [];
+}
+
+export function isValidationValid(raw: unknown): boolean {
+  if (typeof raw === 'boolean') return raw;
+  if (typeof raw === 'number') return raw > 0;
+  if (typeof raw === 'string') {
+    const normalized = raw.trim().toLowerCase();
+    if (!normalized) return false;
+    if (
+      ['true', 'ok', 'pass', 'passed', 'valid', '1', 'yes', 'y'].includes(
+        normalized
+      )
+    ) {
+      return true;
+    }
+    if (
+      ['false', 'fail', 'failed', 'invalid', '0', 'no', 'n'].includes(
+        normalized
+      )
+    ) {
+      return false;
+    }
+  }
+  return false;
 }

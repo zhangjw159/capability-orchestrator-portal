@@ -1,14 +1,17 @@
 import { request } from '@/base/api/request';
 import type {
+  ExecuteFlowPayload,
+  ExecuteFlowResult,
   ExecutionDetail,
   ExecutionStep,
   ExecutionSummary,
-  ExecuteFlowPayload,
-  ExecuteFlowResult,
   Flow,
   FlowDefinitionDetail,
   FlowDefinitionSummary,
   OrchestratorSkill,
+  PlanFlowResponse,
+  PlanInput,
+  PlanResult,
   ValidateFlowResult,
 } from '@/types/orchestrator';
 
@@ -42,6 +45,19 @@ type RawValidationResult = {
   valid?: boolean;
   errors?: RawValidationIssue[];
   warnings?: RawValidationIssue[];
+};
+
+type RawPlanValidation = {
+  valid?: boolean | string | number;
+  errors?: unknown[];
+  warnings?: unknown[];
+  [key: string]: unknown;
+};
+
+type RawPlanResult = {
+  flow?: RawFlow;
+  validation?: RawPlanValidation;
+  [key: string]: unknown;
 };
 
 type RawFlowNode = {
@@ -340,9 +356,33 @@ function toCoreFlow(flow: Flow): RawFlow {
         (edge as { from?: string }).from ??
         (edge as { source?: string }).source ??
         '',
-      to: (edge as { to?: string }).to ?? (edge as { target?: string }).target ?? '',
+      to:
+        (edge as { to?: string }).to ??
+        (edge as { target?: string }).target ??
+        '',
       label: (edge as { label?: string }).label,
       default: (edge as { default?: boolean }).default,
+    })),
+  };
+}
+
+function toFlow(raw: RawFlow): Flow {
+  return {
+    id: raw.id ?? '',
+    name: raw.name ?? '',
+    version: normalizeFlowVersion(raw.version),
+    input: toRecord(raw.input),
+    nodes: (raw.nodes ?? []).map((node) => ({
+      id: node.id ?? '',
+      type: String(node.type ?? 'set') as Flow['nodes'][number]['type'],
+      name: node.name,
+      description: node.description,
+      config: toRecord(node.config),
+    })),
+    edges: (raw.edges ?? []).map((edge) => ({
+      id: edge.id ?? '',
+      from: edge.from ?? '',
+      to: edge.to ?? '',
     })),
   };
 }
@@ -366,21 +406,31 @@ function _toAssetFlowDsl(flow: Flow): RawAssetFlowDefinitionDsl {
         (edge as { from?: string }).from ??
         (edge as { source?: string }).source ??
         '',
-      to: (edge as { to?: string }).to ?? (edge as { target?: string }).target ?? '',
+      to:
+        (edge as { to?: string }).to ??
+        (edge as { target?: string }).target ??
+        '',
       label: (edge as { label?: string }).label,
       default: (edge as { default?: boolean }).default,
     })),
   };
 }
 
-function buildSaveFlowDefinitionRequest(body: SaveDefinitionPayload): RawSaveFlowDefinitionRequest {
-  const candidate = (body as { dsl?: unknown }).dsl ?? (body as { flow?: unknown }).flow;
+function buildSaveFlowDefinitionRequest(
+  body: SaveDefinitionPayload
+): RawSaveFlowDefinitionRequest {
+  const candidate =
+    (body as { dsl?: unknown }).dsl ?? (body as { flow?: unknown }).flow;
   const flowCandidate =
-    (typeof candidate === 'string' ? safeJsonParse<Flow>(candidate) : (candidate as Flow)) ??
+    (typeof candidate === 'string'
+      ? safeJsonParse<Flow>(candidate)
+      : (candidate as Flow)) ??
     ({
       id: (body as { flowId?: string }).flowId ?? 'new-flow',
       name: (body as { name?: string }).name ?? 'New Flow',
-      version: normalizeFlowVersion((body as { version?: string | number }).version),
+      version: normalizeFlowVersion(
+        (body as { version?: string | number }).version
+      ),
       nodes: [],
       edges: [],
     } as Flow);
@@ -409,7 +459,9 @@ function buildSaveFlowDefinitionRequest(body: SaveDefinitionPayload): RawSaveFlo
         (edge as { from?: string }).from ??
         '',
       target:
-        (edge as { target?: string }).target ?? (edge as { to?: string }).to ?? '',
+        (edge as { target?: string }).target ??
+        (edge as { to?: string }).to ??
+        '',
     })),
   };
 
@@ -451,10 +503,23 @@ function toExecutionStep(raw: RawExecutionStepItem): ExecutionStep {
   };
 }
 
+function toPlanResult(raw?: RawPlanResult): PlanResult | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  return {
+    ...raw,
+    flow: raw.flow ? toFlow(raw.flow) : undefined,
+    validation: raw.validation,
+  };
+}
+
 function normalizeSkill(raw: RawSkillItem): OrchestratorSkill {
   const status =
     raw.status ??
-    (typeof raw.enabled === 'boolean' ? (raw.enabled ? 'enabled' : 'disabled') : undefined);
+    (typeof raw.enabled === 'boolean'
+      ? raw.enabled
+        ? 'enabled'
+        : 'disabled'
+      : undefined);
   return {
     skillId: String(raw.skill_id ?? raw.id ?? ''),
     name: raw.name,
@@ -481,7 +546,10 @@ export function saveDefinition(body: SaveDefinitionPayload) {
   const payload = buildSaveFlowDefinitionRequest(body);
   return request
     .post<RawFlowDefinitionModel>(`${PREFIX}/definitions`, payload)
-    .then((raw) => toFlowDefinitionSummary(unwrapResult(raw)) as FlowDefinitionDetail);
+    .then(
+      (raw) =>
+        toFlowDefinitionSummary(unwrapResult(raw)) as FlowDefinitionDetail
+    );
 }
 
 export function getDefinition(definitionId: string) {
@@ -489,7 +557,9 @@ export function getDefinition(definitionId: string) {
     .get<RawGetFlowDefinitionResponse>(`${PREFIX}/definitions/${definitionId}`)
     .then((raw) => {
       const res = unwrapResult(raw);
-      const detail = toFlowDefinitionSummary(res.definition) as FlowDefinitionDetail;
+      const detail = toFlowDefinitionSummary(
+        res.definition
+      ) as FlowDefinitionDetail;
       detail.dsl =
         safeJsonParse<Flow>(res.dsl_json) ??
         safeJsonParse<Flow>(res.definition?.dsl) ??
@@ -508,7 +578,10 @@ export function publishDefinition(
       `${PREFIX}/definitions/${definitionId}/publish`,
       body ?? {}
     )
-    .then((raw) => toFlowDefinitionSummary(unwrapResult(raw)) as FlowDefinitionDetail);
+    .then(
+      (raw) =>
+        toFlowDefinitionSummary(unwrapResult(raw)) as FlowDefinitionDetail
+    );
 }
 
 export function getPublished(flowId: string) {
@@ -516,7 +589,9 @@ export function getPublished(flowId: string) {
     .get<RawGetFlowDefinitionResponse>(`${PREFIX}/published/${flowId}`)
     .then((raw) => {
       const res = unwrapResult(raw);
-      const detail = toFlowDefinitionSummary(res.definition) as FlowDefinitionDetail;
+      const detail = toFlowDefinitionSummary(
+        res.definition
+      ) as FlowDefinitionDetail;
       detail.dsl =
         safeJsonParse<Flow>(res.dsl_json) ??
         safeJsonParse<Flow>(res.definition?.dsl) ??
@@ -527,22 +602,27 @@ export function getPublished(flowId: string) {
 }
 
 export function getDefaultTemplate() {
-  return request.get<RawFlowTemplateResponse>(`${PREFIX}/templates/default`).then((raw) => {
-    const res = unwrapResult(raw);
-    return {
-      templateId: res.template_id,
-      name: res.name,
-      description: res.description,
-      flow: safeJsonParse<Flow>(res.flow_json),
-      flowJson: res.flow_json,
-    } as unknown;
-  });
+  return request
+    .get<RawFlowTemplateResponse>(`${PREFIX}/templates/default`)
+    .then((raw) => {
+      const res = unwrapResult(raw);
+      return {
+        templateId: res.template_id,
+        name: res.name,
+        description: res.description,
+        flow: safeJsonParse<Flow>(res.flow_json),
+        flowJson: res.flow_json,
+      } as unknown;
+    });
 }
 
 export function createDefinitionFromTemplate(body?: SaveDefinitionPayload) {
   const payload = body ? buildSaveFlowDefinitionRequest(body) : undefined;
   return request
-    .post<RawCreateFlowFromTemplateResponse>(`${PREFIX}/definitions/from-template`, payload)
+    .post<RawCreateFlowFromTemplateResponse>(
+      `${PREFIX}/definitions/from-template`,
+      payload
+    )
     .then((raw) => {
       const res = unwrapResult(raw);
       return {
@@ -575,6 +655,55 @@ export function validateFlow(flow: Flow | Record<string, unknown>) {
     });
 }
 
+export async function planFlow(payload: PlanInput): Promise<PlanFlowResponse> {
+  try {
+    const raw = await request.post<RawPlanResult>(
+      `${PREFIX}/flows/plan`,
+      payload
+    );
+    const res = unwrapResult(raw);
+    return {
+      ok: true,
+      statusCode: 200,
+      planResult: toPlanResult(res),
+      raw: res,
+    };
+  } catch (error) {
+    const response = error as { status?: number; data?: unknown };
+    const statusCode = response?.status;
+    const data = response?.data;
+
+    if (
+      statusCode === 400 &&
+      data &&
+      typeof data === 'object' &&
+      'flow' in data
+    ) {
+      return {
+        ok: false,
+        statusCode,
+        planResult: toPlanResult(data as RawPlanResult),
+        message:
+          typeof (data as { message?: unknown }).message === 'string'
+            ? ((data as { message?: string }).message ?? '')
+            : undefined,
+        raw: data,
+      };
+    }
+
+    const message =
+      data && typeof data === 'object' && 'message' in data
+        ? String((data as { message?: unknown }).message ?? '')
+        : '规划失败';
+    return {
+      ok: false,
+      statusCode,
+      message,
+      raw: data,
+    };
+  }
+}
+
 export function listSkills() {
   return request.get<RawSkillListResponse>(`${PREFIX}/skills`).then((raw) => {
     const res = unwrapResult(raw);
@@ -599,16 +728,25 @@ export function updateSkill(
   skillId: string,
   payload: { name?: string; definition?: Record<string, unknown> }
 ) {
-  return request.put<RawSkillItem>(`${PREFIX}/skills/${encodeURIComponent(skillId)}`, {
-    name: payload.name,
-    definition: payload.definition ?? {},
-  });
+  return request.put<RawSkillItem>(
+    `${PREFIX}/skills/${encodeURIComponent(skillId)}`,
+    {
+      name: payload.name,
+      definition: payload.definition ?? {},
+    }
+  );
 }
 
-export function updateSkillStatus(skillId: string, status: 'enabled' | 'disabled') {
-  return request.post<RawSkillItem>(`${PREFIX}/skills/${encodeURIComponent(skillId)}/status`, {
-    status,
-  });
+export function updateSkillStatus(
+  skillId: string,
+  status: 'enabled' | 'disabled'
+) {
+  return request.post<RawSkillItem>(
+    `${PREFIX}/skills/${encodeURIComponent(skillId)}/status`,
+    {
+      status,
+    }
+  );
 }
 
 export function reloadSkills() {

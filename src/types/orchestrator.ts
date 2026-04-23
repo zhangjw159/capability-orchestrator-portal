@@ -64,6 +64,33 @@ export interface ValidateFlowResult {
   [key: string]: unknown;
 }
 
+export interface PlanInput {
+  goal: string;
+  context?: Record<string, unknown>;
+  constraints?: Record<string, unknown>;
+}
+
+export interface PlanValidation {
+  valid?: boolean | string | number;
+  errors?: unknown[];
+  warnings?: unknown[];
+  [key: string]: unknown;
+}
+
+export interface PlanResult {
+  flow?: Flow;
+  validation?: PlanValidation;
+  [key: string]: unknown;
+}
+
+export interface PlanFlowResponse {
+  ok: boolean;
+  statusCode?: number;
+  planResult?: PlanResult;
+  message?: string;
+  raw?: unknown;
+}
+
 export interface ValidationIssue {
   code?: string;
   nodeId?: string;

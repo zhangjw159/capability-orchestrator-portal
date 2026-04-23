@@ -1,32 +1,53 @@
 'use client';
 
-import { App, Button, Card, Collapse, Form, Input, Select, Space, Tag } from 'antd';
+import {
+  App,
+  Button,
+  Card,
+  Collapse,
+  Form,
+  Input,
+  Select,
+  Space,
+  Tag,
+} from 'antd';
 import TextArea from 'antd/es/input/TextArea';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import ReactFlow, {
-  Background,
-  Controls,
-  Handle,
-  MarkerType,
-  MiniMap,
-  Position,
   addEdge,
   applyEdgeChanges,
   applyNodeChanges,
+  Background,
   type Connection,
+  Controls,
   type Edge,
+  type EdgeChange,
+  Handle,
+  MarkerType,
+  MiniMap,
   type Node,
   type NodeChange,
-  type EdgeChange,
+  Position,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { v4 as uuidv4 } from 'uuid';
 
-import { executeFlow, saveDefinition, validateFlow } from '@/api/orchestrator';
+import {
+  executeFlow,
+  planFlow,
+  saveDefinition,
+  validateFlow,
+} from '@/api/orchestrator';
 import { listTools } from '@/api/tools';
-import { extractToolsList } from '@/lib/orchestrator';
-import type { Flow, FlowNodeType, OrchestratorSkill, ValidationIssue } from '@/types/orchestrator';
+import { extractToolsList, isValidationValid } from '@/lib/orchestrator';
+import { useOrchestratorPlanStore } from '@/store/orchestratorPlanStore';
+import type {
+  Flow,
+  FlowNodeType,
+  OrchestratorSkill,
+  ValidationIssue,
+} from '@/types/orchestrator';
 
 const NODE_TYPES: FlowNodeType[] = [
   'start',
@@ -50,7 +71,10 @@ type Props = {
 
 const DEFAULT_FLOW_VERSION = 'flow/v1';
 
-function buildDefaultNodeConfig(type: FlowNodeType, nodeId: string): Record<string, unknown> {
+function buildDefaultNodeConfig(
+  type: FlowNodeType,
+  nodeId: string
+): Record<string, unknown> {
   if (type === 'tool') {
     return {
       toolId: '',
@@ -87,7 +111,10 @@ function buildDefaultNodeConfig(type: FlowNodeType, nodeId: string): Record<stri
 function normalizeEditorFlow(flow: Flow): Flow {
   const rawVersion = String(flow.version ?? '').trim();
   const normalizedVersion =
-    !rawVersion || rawVersion === '1' || rawVersion === '1.0' || rawVersion === 'v1'
+    !rawVersion ||
+    rawVersion === '1' ||
+    rawVersion === '1.0' ||
+    rawVersion === 'v1'
       ? DEFAULT_FLOW_VERSION
       : rawVersion;
   return {
@@ -98,6 +125,15 @@ function normalizeEditorFlow(flow: Flow): Flow {
         ? flow.input
         : { output: {} },
   };
+}
+
+function parseJsonRecord(raw: string): Record<string, unknown> {
+  if (!raw.trim()) return {};
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('需为 JSON 对象');
+  }
+  return parsed as Record<string, unknown>;
 }
 
 function buildArgsTemplateFromSchema(schema: unknown): Record<string, unknown> {
@@ -156,18 +192,28 @@ function resolveArgsSchema(inputSchema: unknown): unknown {
   return extractBodySchema(inputSchema) ?? inputSchema;
 }
 
-function toEditableInput(configInput: unknown, _inputSchema: unknown): Record<string, unknown> {
+function toEditableInput(
+  configInput: unknown,
+  _inputSchema: unknown
+): Record<string, unknown> {
   if (!configInput || typeof configInput !== 'object') return {};
   return configInput as Record<string, unknown>;
 }
 
-function toConfigInput(editableInput: Record<string, unknown>, _inputSchema: unknown): Record<string, unknown> {
+function toConfigInput(
+  editableInput: Record<string, unknown>,
+  _inputSchema: unknown
+): Record<string, unknown> {
   return editableInput;
 }
 
 const FlowNodeCard = ({ data }: { data: { label?: string } }) => (
   <div className='rounded border border-neutral-300 bg-white px-3 py-2 text-xs shadow-sm'>
-    <Handle type='target' position={Position.Top} style={{ width: 8, height: 8, background: '#1677ff' }} />
+    <Handle
+      type='target'
+      position={Position.Top}
+      style={{ width: 8, height: 8, background: '#1677ff' }}
+    />
     <div className='text-neutral-800'>{data?.label ?? 'node'}</div>
     <Handle
       type='source'
@@ -180,14 +226,28 @@ const FlowNodeCard = ({ data }: { data: { label?: string } }) => (
 function toCanvas(flow: Flow): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = (flow.nodes ?? []).map((node, index) => ({
     id: node.id,
-    position: { x: 120 + (index % 4) * 220, y: 80 + Math.floor(index / 4) * 120 },
+    position: {
+      x: 120 + (index % 4) * 220,
+      y: 80 + Math.floor(index / 4) * 120,
+    },
     data: { label: node.name || `${node.type}:${node.id}` },
-    style: { borderRadius: 8, border: '1px solid #d9d9d9', padding: 6, width: 180 },
+    style: {
+      borderRadius: 8,
+      border: '1px solid #d9d9d9',
+      padding: 6,
+      width: 180,
+    },
   }));
   const edges: Edge[] = (flow.edges ?? []).map((edge) => ({
     id: edge.id || uuidv4(),
-    source: (edge as { source?: string; from?: string }).source ?? (edge as { from?: string }).from ?? '',
-    target: (edge as { target?: string; to?: string }).target ?? (edge as { to?: string }).to ?? '',
+    source:
+      (edge as { source?: string; from?: string }).source ??
+      (edge as { from?: string }).from ??
+      '',
+    target:
+      (edge as { target?: string; to?: string }).target ??
+      (edge as { to?: string }).to ??
+      '',
     label: (edge as { label?: string }).label,
     data: {
       rawEdge: edge,
@@ -213,8 +273,13 @@ function toFlow(base: Flow, nodes: Node[], edges: Edge[]): Flow {
     }),
     edges: edges.map((edge) => {
       const raw =
-        edge.data && typeof edge.data === 'object' && 'rawEdge' in (edge.data as Record<string, unknown>)
-          ? ((edge.data as Record<string, unknown>).rawEdge as Record<string, unknown>)
+        edge.data &&
+        typeof edge.data === 'object' &&
+        'rawEdge' in (edge.data as Record<string, unknown>)
+          ? ((edge.data as Record<string, unknown>).rawEdge as Record<
+              string,
+              unknown
+            >)
           : {};
       const next: Record<string, unknown> = {
         ...raw,
@@ -249,7 +314,9 @@ function normalizeConfirmEdgeLabels(
 
   const labeled = [...inputEdges];
   for (const [sourceId, outgoingEdges] of grouped.entries()) {
-    const toCanonicalConfirmLabel = (label: unknown): 'true' | 'false' | undefined => {
+    const toCanonicalConfirmLabel = (
+      label: unknown
+    ): 'true' | 'false' | undefined => {
       if (label === true) return 'true';
       if (label === false) return 'false';
       if (typeof label !== 'string') return undefined;
@@ -266,7 +333,9 @@ function normalizeConfirmEdgeLabels(
     });
     const hasTrue = normalizedForNode.some((edge) => edge.label === 'true');
     const hasFalse = normalizedForNode.some((edge) => edge.label === 'false');
-    const missing = normalizedForNode.filter((edge) => edge.label !== 'true' && edge.label !== 'false');
+    const missing = normalizedForNode.filter(
+      (edge) => edge.label !== 'true' && edge.label !== 'false'
+    );
 
     const assignQueue: string[] = [];
     if (!hasTrue) assignQueue.push('true');
@@ -309,13 +378,35 @@ const FlowCanvasEditor = ({
   const [inputText, setInputText] = useState('{}');
   const [executeResult, setExecuteResult] = useState<unknown>(null);
   const [toolOptions, setToolOptions] = useState<
-    Array<{ value: string; label: string; server?: string; name?: string; inputSchema?: unknown }>
+    Array<{
+      value: string;
+      label: string;
+      server?: string;
+      name?: string;
+      inputSchema?: unknown;
+    }>
   >([]);
   const [toolInputText, setToolInputText] = useState('{}');
   const [toolInputError, setToolInputError] = useState<string | null>(null);
   const [refArgKey, setRefArgKey] = useState('');
   const [refOutputPath, setRefOutputPath] = useState('data');
   const [dslImportText, setDslImportText] = useState('');
+  const [planContextText, setPlanContextText] = useState('{}');
+  const [planConstraintsText, setPlanConstraintsText] = useState('{}');
+  const {
+    planInput,
+    planResult,
+    planStatus,
+    validationSource,
+    planErrorText,
+    planRawResponse,
+    setPlanInput,
+    setPlanResult,
+    setPlanStatus,
+    setValidationSource,
+    setPlanErrorText,
+    setPlanRawResponse,
+  } = useOrchestratorPlanStore();
 
   useEffect(() => {
     const normalizedInitial = normalizeEditorFlow(initialFlow);
@@ -324,6 +415,13 @@ const FlowCanvasEditor = ({
     setNodes(mapped.nodes);
     setEdges(normalizeConfirmEdgeLabels(mapped.edges, normalizedInitial.nodes));
   }, [initialFlow]);
+
+  useEffect(() => {
+    setPlanContextText(JSON.stringify(planInput.context ?? {}, null, 2));
+    setPlanConstraintsText(
+      JSON.stringify(planInput.constraints ?? {}, null, 2)
+    );
+  }, [planInput.constraints, planInput.context]);
 
   useEffect(() => {
     let cancelled = false;
@@ -335,7 +433,9 @@ const FlowCanvasEditor = ({
         setToolOptions(
           tools.map((tool) => ({
             value: String(tool.toolId ?? tool.id ?? ''),
-            label: String(tool.displayName ?? tool.name ?? tool.toolId ?? tool.id ?? ''),
+            label: String(
+              tool.displayName ?? tool.name ?? tool.toolId ?? tool.id ?? ''
+            ),
             server: typeof tool.server === 'string' ? tool.server : undefined,
             name: typeof tool.name === 'string' ? tool.name : undefined,
             inputSchema: tool.inputSchema,
@@ -390,7 +490,12 @@ const FlowCanvasEditor = ({
   }, []);
   const onEdgesChange = useCallback(
     (changes: EdgeChange[]) => {
-      setEdges((current) => normalizeConfirmEdgeLabels(applyEdgeChanges(changes, current), flowDraft.nodes));
+      setEdges((current) =>
+        normalizeConfirmEdgeLabels(
+          applyEdgeChanges(changes, current),
+          flowDraft.nodes
+        )
+      );
     },
     [flowDraft.nodes]
   );
@@ -398,7 +503,14 @@ const FlowCanvasEditor = ({
     (connection: Edge | Connection) => {
       setEdges((current) =>
         normalizeConfirmEdgeLabels(
-          addEdge({ ...connection, id: uuidv4(), markerEnd: { type: MarkerType.ArrowClosed } }, current),
+          addEdge(
+            {
+              ...connection,
+              id: uuidv4(),
+              markerEnd: { type: MarkerType.ArrowClosed },
+            },
+            current
+          ),
           flowDraft.nodes
         )
       );
@@ -411,16 +523,29 @@ const FlowCanvasEditor = ({
       const id = `${type}-${Math.random().toString(36).slice(2, 8)}`;
       const nextNode: Node = {
         id,
-        position: { x: 120 + (nodes.length % 4) * 220, y: 80 + Math.floor(nodes.length / 4) * 120 },
+        position: {
+          x: 120 + (nodes.length % 4) * 220,
+          y: 80 + Math.floor(nodes.length / 4) * 120,
+        },
         data: { label: `${type}-${id}` },
-        style: { borderRadius: 8, border: '1px solid #d9d9d9', padding: 6, width: 180 },
+        style: {
+          borderRadius: 8,
+          border: '1px solid #d9d9d9',
+          padding: 6,
+          width: 180,
+        },
       };
       setNodes((current) => [...current, nextNode]);
       setFlowDraft((prev) => ({
         ...prev,
         nodes: [
           ...prev.nodes,
-          { id, type, name: `${type}-${id}`, config: buildDefaultNodeConfig(type, id) },
+          {
+            id,
+            type,
+            name: `${type}-${id}`,
+            config: buildDefaultNodeConfig(type, id),
+          },
         ],
       }));
       setSelectedNodeId(id);
@@ -433,12 +558,16 @@ const FlowCanvasEditor = ({
       if (!selectedNodeId) return;
       setFlowDraft((prev) => ({
         ...prev,
-        nodes: prev.nodes.map((node) => (node.id === selectedNodeId ? { ...node, ...patch } : node)),
+        nodes: prev.nodes.map((node) =>
+          node.id === selectedNodeId ? { ...node, ...patch } : node
+        ),
       }));
       if (patch.name) {
         setNodes((current) =>
           current.map((node) =>
-            node.id === selectedNodeId ? { ...node, data: { ...node.data, label: patch.name } } : node
+            node.id === selectedNodeId
+              ? { ...node, data: { ...node.data, label: patch.name } }
+              : node
           )
         );
       }
@@ -457,7 +586,9 @@ const FlowCanvasEditor = ({
     try {
       parsed = JSON.parse(toolInputText) as Record<string, unknown>;
     } catch (error) {
-      setToolInputError(`参数 JSON 无效：${error instanceof Error ? error.message : 'parse error'}`);
+      setToolInputError(
+        `参数 JSON 无效：${error instanceof Error ? error.message : 'parse error'}`
+      );
       return;
     }
     const next = {
@@ -499,12 +630,18 @@ const FlowCanvasEditor = ({
     setSaving(true);
     try {
       // 保存前再次强规范 confirm 分支，避免 true/false 因空格或大小写导致执行期不匹配
-      const normalizedEdges = normalizeConfirmEdgeLabels(edges, flowDraft.nodes);
+      const normalizedEdges = normalizeConfirmEdgeLabels(
+        edges,
+        flowDraft.nodes
+      );
       const normalizedFlow = toFlow(flowDraft, nodes, normalizedEdges);
       setEdges(normalizedEdges);
       setFlowDraft(normalizedFlow);
       const validation = await validateFlow(normalizedFlow);
-      const issues = [...(validation.errorIssues ?? []), ...(validation.warningIssues ?? [])];
+      const issues = [
+        ...(validation.errorIssues ?? []),
+        ...(validation.warningIssues ?? []),
+      ];
       setValidateIssues(issues);
       if (validation.valid === false) return;
       await saveDefinition({
@@ -569,7 +706,11 @@ const FlowCanvasEditor = ({
     }
     try {
       const parsed = JSON.parse(dslImportText) as Flow;
-      if (!parsed || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
+      if (
+        !parsed ||
+        !Array.isArray(parsed.nodes) ||
+        !Array.isArray(parsed.edges)
+      ) {
         message.error('DSL 需包含 nodes 与 edges 数组');
         return;
       }
@@ -582,9 +723,85 @@ const FlowCanvasEditor = ({
       setSelectedEdgeId(undefined);
       message.success('已根据 DSL 自动生成画板元素');
     } catch (error) {
-      message.error(`DSL JSON 解析失败：${error instanceof Error ? error.message : 'parse error'}`);
+      message.error(
+        `DSL JSON 解析失败：${error instanceof Error ? error.message : 'parse error'}`
+      );
     }
   }, [dslImportText, message]);
+
+  const applyPlannedFlow = useCallback(
+    (nextFlow?: Flow) => {
+      if (!nextFlow) {
+        message.warning('规划结果未包含可执行 flow');
+        return;
+      }
+      const normalized = normalizeEditorFlow(nextFlow);
+      const mapped = toCanvas(normalized);
+      setFlowDraft(normalized);
+      setNodes(mapped.nodes);
+      setEdges(normalizeConfirmEdgeLabels(mapped.edges, normalized.nodes));
+      setSelectedNodeId(undefined);
+      setSelectedEdgeId(undefined);
+      message.success('已将规划结果应用到画布');
+    },
+    [message]
+  );
+
+  const handleGeneratePlan = useCallback(async () => {
+    const goal = planInput.goal?.trim();
+    if (!goal) {
+      message.warning('请先输入 goal');
+      return;
+    }
+    setPlanStatus('loading');
+    setPlanErrorText('');
+    setPlanRawResponse(null);
+    setPlanResult(null);
+    try {
+      const context = parseJsonRecord(planContextText);
+      const constraints = parseJsonRecord(planConstraintsText);
+      setPlanInput({ goal, context, constraints });
+      const result = await planFlow({
+        goal,
+        context,
+        constraints,
+      });
+      setPlanRawResponse(result.raw ?? null);
+      setPlanResult(result.planResult ?? null);
+      setValidationSource('langgraph');
+      if (result.ok) {
+        setPlanStatus('success');
+        message.success('AI 规划完成');
+        return;
+      }
+      if (result.planResult?.flow) {
+        setPlanStatus('error');
+        message.warning(
+          result.message || '规划校验未通过，可选择继续应用后手工修复'
+        );
+        return;
+      }
+      setPlanStatus('error');
+      setPlanErrorText(result.message || '规划失败');
+      message.error(result.message || '规划失败');
+    } catch (error) {
+      const text = error instanceof Error ? error.message : '规划请求失败';
+      setPlanStatus('error');
+      setPlanErrorText(text);
+      message.error(text);
+    }
+  }, [
+    message,
+    planConstraintsText,
+    planContextText,
+    planInput.goal,
+    setPlanErrorText,
+    setPlanInput,
+    setPlanRawResponse,
+    setPlanResult,
+    setPlanStatus,
+    setValidationSource,
+  ]);
 
   const handleReloadDefinitionDsl = useCallback(async () => {
     if (!onReloadDefinitionDsl) return;
@@ -611,13 +828,19 @@ const FlowCanvasEditor = ({
     () => new Set(validateIssues.map((issue) => issue.nodeId).filter(Boolean)),
     [validateIssues]
   );
+  const planValid = useMemo(
+    () => isValidationValid(planResult?.validation?.valid),
+    [planResult?.validation?.valid]
+  );
+  const planNodeCount = planResult?.flow?.nodes?.length ?? 0;
+  const planEdgeCount = planResult?.flow?.edges?.length ?? 0;
   const nodeTypes = useMemo(() => ({ cardNode: FlowNodeCard }), []);
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-12 gap-4">
-        <Card className="col-span-2" title="节点库" size="small">
-          <Space direction="vertical" className="w-full">
+    <div className='flex flex-col gap-4'>
+      <div className='grid grid-cols-12 gap-4'>
+        <Card className='col-span-2' title='节点库' size='small'>
+          <Space direction='vertical' className='w-full'>
             {NODE_TYPES.map((type) => (
               <Button key={type} block onClick={() => handleAddNode(type)}>
                 {type}
@@ -625,12 +848,16 @@ const FlowCanvasEditor = ({
             ))}
           </Space>
         </Card>
-        <Card className="col-span-7" title="Flow 画布" size="small">
-          <div className="h-[560px]">
+        <Card className='col-span-7' title='Flow 画布' size='small'>
+          <div className='h-[560px]'>
             <ReactFlow
               nodes={nodes.map((node) =>
                 issueNodeIdSet.has(node.id)
-                  ? { ...node, style: { ...node.style, border: '1px solid #ff4d4f' }, type: 'cardNode' }
+                  ? {
+                      ...node,
+                      style: { ...node.style, border: '1px solid #ff4d4f' },
+                      type: 'cardNode',
+                    }
                   : { ...node, type: 'cardNode' }
               )}
               nodeTypes={nodeTypes}
@@ -656,38 +883,49 @@ const FlowCanvasEditor = ({
               <Controls />
               <Background />
             </ReactFlow>
-            <div className="mt-2 text-xs text-neutral-500">
+            <div className='mt-2 text-xs text-neutral-500'>
               连线方式：从节点上方/下方的蓝色圆点按住拖拽到目标节点圆点。
             </div>
           </div>
         </Card>
-        <Card className="col-span-3" title="节点属性" size="small">
+        <Card className='col-span-3' title='节点属性' size='small'>
           {selectedNode ? (
-            <Form layout="vertical">
-              <Form.Item label="节点 ID">
+            <Form layout='vertical'>
+              <Form.Item label='节点 ID'>
                 <Input value={selectedNode.id} disabled />
               </Form.Item>
-              <Form.Item label="节点类型">
+              <Form.Item label='节点类型'>
                 <Select
                   value={selectedNode.type}
-                  options={NODE_TYPES.map((type) => ({ value: type, label: type }))}
+                  options={NODE_TYPES.map((type) => ({
+                    value: type,
+                    label: type,
+                  }))}
                   onChange={(value) => updateNode({ type: value })}
                 />
               </Form.Item>
-              <Form.Item label="节点名称">
-                <Input value={selectedNode.name} onChange={(e) => updateNode({ name: e.target.value })} />
+              <Form.Item label='节点名称'>
+                <Input
+                  value={selectedNode.name}
+                  onChange={(e) => updateNode({ name: e.target.value })}
+                />
               </Form.Item>
               {selectedNode.type === 'tool' ? (
                 <>
-                  <Form.Item label="tool.mode">
+                  <Form.Item label='tool.mode'>
                     <Select
-                      value={String((selectedNode.config?.mode as string) ?? 'skill')}
+                      value={String(
+                        (selectedNode.config?.mode as string) ?? 'skill'
+                      )}
                       options={[
                         { value: 'skill', label: 'skill' },
                         { value: 'tool', label: 'tool' },
                       ]}
                       onChange={(value) => {
-                        const nextConfig = { ...(selectedNode.config ?? {}), mode: value };
+                        const nextConfig = {
+                          ...(selectedNode.config ?? {}),
+                          mode: value,
+                        };
                         if (value === 'skill') {
                           delete (nextConfig as Record<string, unknown>).toolId;
                           delete (nextConfig as Record<string, unknown>).server;
@@ -700,26 +938,41 @@ const FlowCanvasEditor = ({
                       }}
                     />
                   </Form.Item>
-                  {String((selectedNode.config?.mode as string) ?? 'skill') === 'skill' ? (
-                    <Form.Item label="config.skill">
+                  {String((selectedNode.config?.mode as string) ?? 'skill') ===
+                  'skill' ? (
+                    <Form.Item label='config.skill'>
                       <Select
-                        value={String((selectedNode.config?.skill as string) ?? '')}
-                        options={skills.map((skill) => ({ value: skill.skillId, label: skill.skillId }))}
+                        value={String(
+                          (selectedNode.config?.skill as string) ?? ''
+                        )}
+                        options={skills.map((skill) => ({
+                          value: skill.skillId,
+                          label: skill.skillId,
+                        }))}
                         onChange={(value) =>
-                          updateNode({ config: { ...(selectedNode.config ?? {}), skill: value } })
+                          updateNode({
+                            config: {
+                              ...(selectedNode.config ?? {}),
+                              skill: value,
+                            },
+                          })
                         }
                       />
                     </Form.Item>
                   ) : (
                     <>
-                      <Form.Item label="toolId">
+                      <Form.Item label='toolId'>
                         <Select
                           showSearch
-                          value={String((selectedNode.config?.toolId as string) ?? '')}
-                          placeholder="请选择已注册 tool"
+                          value={String(
+                            (selectedNode.config?.toolId as string) ?? ''
+                          )}
+                          placeholder='请选择已注册 tool'
                           options={toolOptions}
                           onChange={(value) => {
-                            const selected = toolOptions.find((tool) => tool.value === value);
+                            const selected = toolOptions.find(
+                              (tool) => tool.value === value
+                            );
                             const schemaTemplate = buildArgsTemplateFromSchema(
                               resolveArgsSchema(selected?.inputSchema)
                             );
@@ -729,28 +982,44 @@ const FlowCanvasEditor = ({
                                 toolId: value,
                                 input:
                                   selectedNode.config?.input &&
-                                  typeof selectedNode.config.input === 'object' &&
-                                  Object.keys(selectedNode.config.input as Record<string, unknown>).length > 0
+                                  typeof selectedNode.config.input ===
+                                    'object' &&
+                                  Object.keys(
+                                    selectedNode.config.input as Record<
+                                      string,
+                                      unknown
+                                    >
+                                  ).length > 0
                                     ? selectedNode.config.input
-                                    : toConfigInput(schemaTemplate, selected?.inputSchema),
+                                    : toConfigInput(
+                                        schemaTemplate,
+                                        selected?.inputSchema
+                                      ),
                               },
                             });
-                            setToolInputText(JSON.stringify(schemaTemplate, null, 2));
+                            setToolInputText(
+                              JSON.stringify(schemaTemplate, null, 2)
+                            );
                             setToolInputError(null);
                           }}
                         />
                       </Form.Item>
-                      <Form.Item label="server">
+                      <Form.Item label='server'>
                         <Input
-                          value={String((selectedNode.config?.server as string) ?? '')}
+                          value={String(
+                            (selectedNode.config?.server as string) ?? ''
+                          )}
                           onChange={(e) =>
                             updateNode({
-                              config: { ...(selectedNode.config ?? {}), server: e.target.value },
+                              config: {
+                                ...(selectedNode.config ?? {}),
+                                server: e.target.value,
+                              },
                             })
                           }
                         />
                       </Form.Item>
-                      <Form.Item label="input(JSON)">
+                      <Form.Item label='input(JSON)'>
                         <TextArea
                           rows={8}
                           value={toolInputText}
@@ -758,12 +1027,18 @@ const FlowCanvasEditor = ({
                             const next = e.target.value;
                             setToolInputText(next);
                             try {
-                              const parsed = JSON.parse(next) as Record<string, unknown>;
+                              const parsed = JSON.parse(next) as Record<
+                                string,
+                                unknown
+                              >;
                               setToolInputError(null);
                               updateNode({
                                 config: {
                                   ...(selectedNode.config ?? {}),
-                                  input: toConfigInput(parsed, selectedToolOption?.inputSchema),
+                                  input: toConfigInput(
+                                    parsed,
+                                    selectedToolOption?.inputSchema
+                                  ),
                                 },
                               });
                             } catch (error) {
@@ -775,45 +1050,63 @@ const FlowCanvasEditor = ({
                           placeholder='根据所选工具 inputSchema 填写，例如 {"search_value":"{{index .input \"search_value\"}}"}'
                         />
                         {toolInputError ? (
-                          <div className="mt-1 text-xs text-red-500">{toolInputError}</div>
+                          <div className='mt-1 text-xs text-red-500'>
+                            {toolInputError}
+                          </div>
                         ) : selectedToolOption?.inputSchema ? (
-                          <div className="mt-1 text-xs text-neutral-500">
-                            已按 body schema（若存在）/inputSchema 生成参数模板。
+                          <div className='mt-1 text-xs text-neutral-500'>
+                            已按 body schema（若存在）/inputSchema
+                            生成参数模板。
                           </div>
                         ) : (
-                          <div className="mt-1 text-xs text-neutral-500">该工具未提供 inputSchema，手动填写参数。</div>
+                          <div className='mt-1 text-xs text-neutral-500'>
+                            该工具未提供 inputSchema，手动填写参数。
+                          </div>
                         )}
                         {selectedToolOption?.inputSchema ? (
-                          <pre className="mt-2 max-h-32 overflow-auto rounded bg-neutral-50 p-2 text-xs">
-                            {JSON.stringify(extractBodySchema(selectedToolOption.inputSchema) ?? '该工具未提供 body schema', null, 2)}
+                          <pre className='mt-2 max-h-32 overflow-auto rounded bg-neutral-50 p-2 text-xs'>
+                            {JSON.stringify(
+                              extractBodySchema(
+                                selectedToolOption.inputSchema
+                              ) ?? '该工具未提供 body schema',
+                              null,
+                              2
+                            )}
                           </pre>
                         ) : null}
                       </Form.Item>
-                      <Form.Item label="output">
+                      <Form.Item label='output'>
                         <Input
-                          value={String((selectedNode.config?.output as string) ?? '')}
+                          value={String(
+                            (selectedNode.config?.output as string) ?? ''
+                          )}
                           onChange={(e) =>
                             updateNode({
-                              config: { ...(selectedNode.config ?? {}), output: e.target.value },
+                              config: {
+                                ...(selectedNode.config ?? {}),
+                                output: e.target.value,
+                              },
                             })
                           }
-                          placeholder="例如 profile"
+                          placeholder='例如 profile'
                         />
                       </Form.Item>
-                      <Form.Item label="从指定 tool output 引用">
-                        <div className="flex flex-col gap-2">
+                      <Form.Item label='从指定 tool output 引用'>
+                        <div className='flex flex-col gap-2'>
                           <Input
                             value={refArgKey}
                             onChange={(e) => setRefArgKey(e.target.value)}
-                            placeholder="目标参数名，例如 userId"
+                            placeholder='目标参数名，例如 userId'
                           />
                           <Input
                             value={refOutputPath}
                             onChange={(e) => setRefOutputPath(e.target.value)}
                             placeholder='input 键名，例如 search_value（默认同参数名）'
                           />
-                          <Button onClick={handleInsertReference}>插入到 input</Button>
-                          <div className="text-xs text-neutral-500">
+                          <Button onClick={handleInsertReference}>
+                            插入到 input
+                          </Button>
+                          <div className='text-xs text-neutral-500'>
                             引用格式：{'{{index .input "search_value"}}'}
                           </div>
                         </div>
@@ -824,24 +1117,34 @@ const FlowCanvasEditor = ({
               ) : null}
               {selectedNode.type === 'template' ? (
                 <>
-                  <Form.Item label="template">
+                  <Form.Item label='template'>
                     <TextArea
                       rows={4}
-                      value={String((selectedNode.config?.template as string) ?? '')}
+                      value={String(
+                        (selectedNode.config?.template as string) ?? ''
+                      )}
                       onChange={(e) =>
                         updateNode({
-                          config: { ...(selectedNode.config ?? {}), template: e.target.value },
+                          config: {
+                            ...(selectedNode.config ?? {}),
+                            template: e.target.value,
+                          },
                         })
                       }
                       placeholder='例如 {{index .driver_list.list 0 "id"}}'
                     />
                   </Form.Item>
-                  <Form.Item label="output">
+                  <Form.Item label='output'>
                     <Input
-                      value={String((selectedNode.config?.output as string) ?? '')}
+                      value={String(
+                        (selectedNode.config?.output as string) ?? ''
+                      )}
                       onChange={(e) =>
                         updateNode({
-                          config: { ...(selectedNode.config ?? {}), output: e.target.value },
+                          config: {
+                            ...(selectedNode.config ?? {}),
+                            output: e.target.value,
+                          },
                         })
                       }
                       placeholder='例如 driver_id 或 output.summary'
@@ -851,15 +1154,24 @@ const FlowCanvasEditor = ({
               ) : null}
               {selectedNode.type === 'model' ? (
                 <>
-                  <Form.Item label="meta.model">
+                  <Form.Item label='meta.model'>
                     <Input
-                      value={String((selectedNode.config?.meta as Record<string, unknown> | undefined)?.model ?? '')}
+                      value={String(
+                        (
+                          selectedNode.config?.meta as
+                            | Record<string, unknown>
+                            | undefined
+                        )?.model ?? ''
+                      )}
                       onChange={(e) =>
                         updateNode({
                           config: {
                             ...(selectedNode.config ?? {}),
                             meta: {
-                              ...((selectedNode.config?.meta as Record<string, unknown>) ?? {}),
+                              ...((selectedNode.config?.meta as Record<
+                                string,
+                                unknown
+                              >) ?? {}),
                               model: e.target.value,
                             },
                           },
@@ -868,17 +1180,24 @@ const FlowCanvasEditor = ({
                       placeholder='例如 deepseek-chat'
                     />
                   </Form.Item>
-                  <Form.Item label="meta.temperature">
+                  <Form.Item label='meta.temperature'>
                     <Input
                       value={String(
-                        (selectedNode.config?.meta as Record<string, unknown> | undefined)?.temperature ?? ''
+                        (
+                          selectedNode.config?.meta as
+                            | Record<string, unknown>
+                            | undefined
+                        )?.temperature ?? ''
                       )}
                       onChange={(e) =>
                         updateNode({
                           config: {
                             ...(selectedNode.config ?? {}),
                             meta: {
-                              ...((selectedNode.config?.meta as Record<string, unknown>) ?? {}),
+                              ...((selectedNode.config?.meta as Record<
+                                string,
+                                unknown
+                              >) ?? {}),
                               temperature: Number(e.target.value || 0),
                             },
                           },
@@ -887,23 +1206,33 @@ const FlowCanvasEditor = ({
                       placeholder='例如 0.2'
                     />
                   </Form.Item>
-                  <Form.Item label="prompt">
+                  <Form.Item label='prompt'>
                     <TextArea
                       rows={6}
-                      value={String((selectedNode.config?.prompt as string) ?? '')}
+                      value={String(
+                        (selectedNode.config?.prompt as string) ?? ''
+                      )}
                       onChange={(e) =>
                         updateNode({
-                          config: { ...(selectedNode.config ?? {}), prompt: e.target.value },
+                          config: {
+                            ...(selectedNode.config ?? {}),
+                            prompt: e.target.value,
+                          },
                         })
                       }
                     />
                   </Form.Item>
-                  <Form.Item label="output">
+                  <Form.Item label='output'>
                     <Input
-                      value={String((selectedNode.config?.output as string) ?? '')}
+                      value={String(
+                        (selectedNode.config?.output as string) ?? ''
+                      )}
                       onChange={(e) =>
                         updateNode({
-                          config: { ...(selectedNode.config ?? {}), output: e.target.value },
+                          config: {
+                            ...(selectedNode.config ?? {}),
+                            output: e.target.value,
+                          },
                         })
                       }
                       placeholder='例如 analysis'
@@ -913,19 +1242,23 @@ const FlowCanvasEditor = ({
               ) : null}
             </Form>
           ) : selectedEdge ? (
-            <Form layout="vertical">
-              <Form.Item label="边 ID">
+            <Form layout='vertical'>
+              <Form.Item label='边 ID'>
                 <Input value={selectedEdge.id} disabled />
               </Form.Item>
-              <Form.Item label="from">
+              <Form.Item label='from'>
                 <Input value={selectedEdge.source} disabled />
               </Form.Item>
-              <Form.Item label="to">
+              <Form.Item label='to'>
                 <Input value={selectedEdge.target} disabled />
               </Form.Item>
-              <Form.Item label="label">
+              <Form.Item label='label'>
                 <Input
-                  value={typeof selectedEdge.label === 'string' ? selectedEdge.label : ''}
+                  value={
+                    typeof selectedEdge.label === 'string'
+                      ? selectedEdge.label
+                      : ''
+                  }
                   onChange={(e) => {
                     const value = e.target.value;
                     setEdges((current) =>
@@ -941,48 +1274,151 @@ const FlowCanvasEditor = ({
               </Form.Item>
             </Form>
           ) : (
-            <div className="text-neutral-500">请先选择一个节点或一条边</div>
+            <div className='text-neutral-500'>请先选择一个节点或一条边</div>
           )}
         </Card>
       </div>
 
       <Collapse
-        defaultActiveKey={['json', 'actions']}
+        defaultActiveKey={['plan', 'json', 'actions']}
         items={[
+          {
+            key: 'plan',
+            label: 'AI 规划',
+            children: (
+              <div className='flex flex-col gap-3'>
+                <Input
+                  addonBefore='goal'
+                  value={planInput.goal}
+                  onChange={(e) => setPlanInput({ goal: e.target.value })}
+                  placeholder='例如：给定订单号查询账单并输出用户摘要'
+                />
+                <TextArea
+                  rows={4}
+                  value={planContextText}
+                  onChange={(e) => setPlanContextText(e.target.value)}
+                  placeholder='context JSON，例如 {"tenant":"demo"}'
+                />
+                <TextArea
+                  rows={4}
+                  value={planConstraintsText}
+                  onChange={(e) => setPlanConstraintsText(e.target.value)}
+                  placeholder='constraints JSON，例如 {"maxNodes":8}'
+                />
+                <Space wrap>
+                  <Button
+                    type='primary'
+                    loading={planStatus === 'loading'}
+                    onClick={handleGeneratePlan}
+                  >
+                    生成 Flow
+                  </Button>
+                  {planResult?.flow ? (
+                    <Button onClick={() => applyPlannedFlow(planResult.flow)}>
+                      应用到画布
+                    </Button>
+                  ) : null}
+                  {planResult?.flow ? (
+                    <Button
+                      onClick={async () => {
+                        const validation = await validateFlow(
+                          planResult.flow as Flow
+                        );
+                        setValidationSource('backend-validate');
+                        const issues = [
+                          ...(validation.errorIssues ?? []),
+                          ...(validation.warningIssues ?? []),
+                        ];
+                        setValidateIssues(issues);
+                        if (validation.valid === false) {
+                          message.warning(
+                            validation.message || '后端校验未通过'
+                          );
+                        } else {
+                          message.success('后端兜底校验通过');
+                        }
+                      }}
+                    >
+                      兜底校验
+                    </Button>
+                  ) : null}
+                </Space>
+                {planResult ? (
+                  <div className='flex flex-wrap gap-2 text-xs'>
+                    <Tag color={planValid ? 'success' : 'error'}>
+                      {planValid ? 'valid=true' : 'valid=false'}
+                    </Tag>
+                    <Tag>nodes={planNodeCount}</Tag>
+                    <Tag>edges={planEdgeCount}</Tag>
+                    <Tag>validationSource={validationSource}</Tag>
+                  </div>
+                ) : null}
+                {planResult?.validation?.errors?.length ? (
+                  <pre className='max-h-48 overflow-auto rounded bg-red-50 p-3 text-xs'>
+                    {JSON.stringify(planResult.validation.errors, null, 2)}
+                  </pre>
+                ) : null}
+                {planResult?.validation?.warnings?.length ? (
+                  <pre className='max-h-48 overflow-auto rounded bg-yellow-50 p-3 text-xs'>
+                    {JSON.stringify(planResult.validation.warnings, null, 2)}
+                  </pre>
+                ) : null}
+                {planErrorText ? (
+                  <Tag color='error'>{planErrorText}</Tag>
+                ) : null}
+                {planRawResponse ? (
+                  <pre className='max-h-64 overflow-auto rounded bg-neutral-50 p-3 text-xs'>
+                    {JSON.stringify(planRawResponse, null, 2)}
+                  </pre>
+                ) : null}
+              </div>
+            ),
+          },
           {
             key: 'actions',
             label: '编辑动作',
             children: (
-              <div className="flex flex-col gap-3">
+              <div className='flex flex-col gap-3'>
                 <Space wrap>
                   <Button onClick={runValidate}>校验</Button>
                   <Button onClick={handleAutoConnect}>一键自动连线</Button>
                   {onReloadDefinitionDsl ? (
-                    <Button onClick={handleReloadDefinitionDsl}>从当前定义重新加载 DSL</Button>
+                    <Button onClick={handleReloadDefinitionDsl}>
+                      从当前定义重新加载 DSL
+                    </Button>
                   ) : null}
-                  <Button type="primary" loading={saving} onClick={handleSave}>
+                  <Button type='primary' loading={saving} onClick={handleSave}>
                     保存草稿
                   </Button>
-                  <Button type="primary" danger loading={executing} onClick={handleValidateAndExecute}>
+                  <Button
+                    type='primary'
+                    danger
+                    loading={executing}
+                    onClick={handleValidateAndExecute}
+                  >
                     校验并执行
                   </Button>
                 </Space>
                 <Input
-                  addonBefore="flowId"
+                  addonBefore='flowId'
                   value={flowDraft.id}
                   disabled={readonlyFlowId}
-                  onChange={(e) => setFlowDraft((prev) => ({ ...prev, id: e.target.value }))}
+                  onChange={(e) =>
+                    setFlowDraft((prev) => ({ ...prev, id: e.target.value }))
+                  }
                 />
                 <Input
-                  addonBefore="flowName"
+                  addonBefore='flowName'
                   value={flowDraft.name}
-                  onChange={(e) => setFlowDraft((prev) => ({ ...prev, name: e.target.value }))}
+                  onChange={(e) =>
+                    setFlowDraft((prev) => ({ ...prev, name: e.target.value }))
+                  }
                 />
                 <TextArea
                   rows={4}
                   value={inputText}
                   onChange={(e) => setInputText(e.target.value)}
-                  placeholder="执行 input JSON"
+                  placeholder='执行 input JSON'
                 />
                 <TextArea
                   rows={8}
@@ -994,14 +1430,18 @@ const FlowCanvasEditor = ({
                   <Button onClick={handleImportDsl}>从 DSL 生成画板</Button>
                 </Space>
                 {validateIssues.length > 0 ? (
-                  <div className="flex flex-wrap gap-2">
+                  <div className='flex flex-wrap gap-2'>
                     {validateIssues.map((issue) => (
                       <Tag
                         key={`${issue.nodeId ?? ''}-${issue.edgeId ?? ''}-${issue.code ?? ''}-${issue.message ?? ''}`}
                         color={issue.nodeId ? 'error' : 'warning'}
                       >
-                        {issue.nodeId ? `节点 ${issue.nodeId}` : issue.edgeId ? `边 ${issue.edgeId}` : '全局'}:
-                        {issue.message}
+                        {issue.nodeId
+                          ? `节点 ${issue.nodeId}`
+                          : issue.edgeId
+                            ? `边 ${issue.edgeId}`
+                            : '全局'}
+                        :{issue.message}
                       </Tag>
                     ))}
                   </div>
@@ -1013,7 +1453,7 @@ const FlowCanvasEditor = ({
             key: 'json',
             label: 'DSL JSON 预览',
             children: (
-              <pre className="max-h-80 overflow-auto rounded bg-neutral-50 p-3 text-xs">
+              <pre className='max-h-80 overflow-auto rounded bg-neutral-50 p-3 text-xs'>
                 {JSON.stringify(flowDraft, null, 2)}
               </pre>
             ),
@@ -1022,8 +1462,10 @@ const FlowCanvasEditor = ({
             key: 'result',
             label: '执行结果',
             children: (
-              <pre className="max-h-80 overflow-auto rounded bg-neutral-50 p-3 text-xs">
-                {executeResult ? JSON.stringify(executeResult, null, 2) : '暂无执行结果'}
+              <pre className='max-h-80 overflow-auto rounded bg-neutral-50 p-3 text-xs'>
+                {executeResult
+                  ? JSON.stringify(executeResult, null, 2)
+                  : '暂无执行结果'}
               </pre>
             ),
           },
