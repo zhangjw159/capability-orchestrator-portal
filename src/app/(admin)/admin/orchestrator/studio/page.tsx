@@ -895,8 +895,8 @@ const StudioPage = () => {
 
   return (
     <PageContainer
-      title='Studio Console'
-      subTitle='Route B：LangGraph Studio 原生工作台'
+      title='AI Planner Console'
+      subTitle='辅助能力：LangGraph 规划与调试（非运行时主链路）'
       extra={[
         <Button key='info' loading={loadingInfo} onClick={loadStudioInfo}>
           刷新 Studio Info

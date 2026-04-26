@@ -13,6 +13,33 @@ export function parseFlowDsl(dsl: unknown): Flow | null {
   return null;
 }
 
+export function normalizeSkillFieldInFlow(flow: Flow): Flow {
+  return {
+    ...flow,
+    nodes: (flow.nodes ?? []).map((node) => {
+      if (node.type !== 'tool') return node;
+      const config =
+        node.config && typeof node.config === 'object' && !Array.isArray(node.config)
+          ? ({ ...node.config } as Record<string, unknown>)
+          : {};
+      const mode = String(config.mode ?? 'skill');
+      if (mode !== 'skill') return { ...node, config };
+      const skillId = String(config.skillId ?? config.skill ?? '').trim();
+      if (!skillId) return { ...node, config };
+      return {
+        ...node,
+        config: {
+          ...config,
+          mode: 'skill',
+          skillId,
+          // backward compatible with old field name expected by some backends
+          skill: skillId,
+        },
+      };
+    }),
+  };
+}
+
 export function normalizeList<T>(
   raw: unknown,
   keys = ['list', 'items', 'data']

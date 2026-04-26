@@ -1,5 +1,7 @@
 import { request } from '@/base/api/request';
 import type {
+  ApplyPlanSkillsRequest,
+  ApplyPlanSkillsResponse,
   ExecuteFlowPayload,
   ExecuteFlowResult,
   ExecutionDetail,
@@ -8,6 +10,12 @@ import type {
   Flow,
   FlowDefinitionDetail,
   FlowDefinitionSummary,
+  GovernanceDecision,
+  GovernanceReportResponse,
+  GovernanceReviewResponse,
+  GovernanceSkill,
+  InvokeSkillRequest,
+  InvokeSkillResponse,
   OrchestratorSkill,
   PlanFlowResponse,
   PlanInput,
@@ -39,6 +47,12 @@ type RawSkillListResponse = {
   skills?: RawSkillItem[];
   list?: RawSkillItem[];
   items?: RawSkillItem[];
+};
+
+type RawGovernanceSkillResponse = {
+  skills?: GovernanceSkill[];
+  list?: GovernanceSkill[];
+  items?: GovernanceSkill[];
 };
 
 type RawValidationResult = {
@@ -177,6 +191,9 @@ type RawExecutionRequest = {
   flowDefinitionId?: string;
   input?: Record<string, unknown>;
   triggeredBy?: string;
+  executionOptions?: {
+    preferSkillExecutor?: boolean;
+  };
 };
 
 type RawTraceStep = {
@@ -508,6 +525,11 @@ function toPlanResult(raw?: RawPlanResult): PlanResult | undefined {
   return {
     ...raw,
     flow: raw.flow ? toFlow(raw.flow) : undefined,
+    skills: Array.isArray((raw as { skills?: unknown[] }).skills)
+      ? ((raw as { skills?: unknown[] }).skills as Array<
+          Record<string, unknown>
+        >)
+      : [],
     validation: raw.validation,
   };
 }
@@ -520,14 +542,35 @@ function normalizeSkill(raw: RawSkillItem): OrchestratorSkill {
         ? 'enabled'
         : 'disabled'
       : undefined);
+  const definition =
+    typeof raw.definition === 'string'
+      ? (safeJsonParse<Record<string, unknown>>(raw.definition) ?? {})
+      : (raw.definition ?? {});
   return {
+    id: raw.id != null ? String(raw.id) : undefined,
     skillId: String(raw.skill_id ?? raw.id ?? ''),
     name: raw.name,
     status,
-    definition:
-      typeof raw.definition === 'string'
-        ? (safeJsonParse<Record<string, unknown>>(raw.definition) ?? {})
-        : (raw.definition ?? {}),
+    definition,
+    binding:
+      definition && typeof definition === 'object'
+        ? ((definition.binding as Record<string, unknown> | undefined) ?? {})
+        : {},
+    runtimePolicy:
+      definition && typeof definition === 'object'
+        ? ((definition.runtimePolicy as Record<string, unknown> | undefined) ??
+          {})
+        : {},
+    inputSchema:
+      definition && typeof definition === 'object'
+        ? ((definition.inputSchema as Record<string, unknown> | undefined) ??
+          {})
+        : {},
+    outputSchema:
+      definition && typeof definition === 'object'
+        ? ((definition.outputSchema as Record<string, unknown> | undefined) ??
+          {})
+        : {},
     updatedAt: raw.updated_at,
     createdAt: raw.created_at,
   };
@@ -712,28 +755,132 @@ export function listSkills() {
   });
 }
 
+export function listGovernanceSkills(params?: { status?: string }) {
+  return request
+    .get<RawGovernanceSkillResponse>(`${PREFIX}/governance-skills`, params)
+    .then((raw) => {
+      const res = unwrapResult(raw);
+      return res.skills ?? res.list ?? res.items ?? [];
+    });
+}
+
+export function createGovernanceSkill(payload: {
+  skill: GovernanceSkill;
+  createdBy?: string;
+}) {
+  return request.post(
+    `${PREFIX}/governance-skills`,
+    {
+      skill: payload.skill,
+      createdBy: payload.createdBy ?? 'portal',
+    },
+    { hideErrorTip: true }
+  );
+}
+
+export function updateGovernanceSkill(
+  skillDefinitionId: string,
+  payload: { skill: GovernanceSkill; updatedBy?: string }
+) {
+  return request.put(
+    `${PREFIX}/governance-skills/${encodeURIComponent(skillDefinitionId)}`,
+    {
+      skill: payload.skill,
+      updatedBy: payload.updatedBy ?? 'portal',
+    },
+    { hideErrorTip: true }
+  );
+}
+
+export function reviewGovernanceSkill(
+  skillId: string,
+  payload: {
+    input?: Record<string, unknown>;
+    headers?: Record<string, unknown>;
+    response?: Record<string, unknown>;
+  }
+) {
+  return request.post<GovernanceReviewResponse>(
+    `${PREFIX}/governance-skills/${encodeURIComponent(skillId)}/review`,
+    payload
+  );
+}
+
+export function getGovernanceReport(params?: { flowId?: string }) {
+  return request.get<GovernanceReportResponse>(
+    `${PREFIX}/governance/reports`,
+    params
+  );
+}
+
+export function listGovernanceDecisions(params?: { status?: string }) {
+  return request
+    .get<{ items?: GovernanceDecision[] }>(
+      `${PREFIX}/governance/decisions`,
+      params
+    )
+    .then((res) => res.items ?? []);
+}
+
+export function approveGovernanceDecision(
+  token: string,
+  payload?: { operator?: string; comment?: string }
+) {
+  return request.post<GovernanceDecision>(
+    `${PREFIX}/governance/decisions/${encodeURIComponent(token)}/approve`,
+    payload ?? {}
+  );
+}
+
+export function rejectGovernanceDecision(
+  token: string,
+  payload?: { operator?: string; comment?: string }
+) {
+  return request.post<GovernanceDecision>(
+    `${PREFIX}/governance/decisions/${encodeURIComponent(token)}/reject`,
+    payload ?? {}
+  );
+}
+
 export function createSkill(payload: {
   skillId: string;
   name?: string;
   definition?: Record<string, unknown>;
 }) {
-  return request.post<RawSkillItem>(`${PREFIX}/skills`, {
-    skill_id: payload.skillId,
+  const mergedSkill = {
+    ...(payload.definition ?? {}),
+    id: payload.skillId,
     name: payload.name,
-    definition: payload.definition ?? {},
-  });
+  } as Record<string, unknown>;
+  return request.post<RawSkillItem>(
+    `${PREFIX}/skills`,
+    {
+      skill: mergedSkill,
+      createdBy: 'portal',
+    },
+    { hideErrorTip: true }
+  );
 }
 
 export function updateSkill(
-  skillId: string,
+  skillDefinitionId: string,
   payload: { name?: string; definition?: Record<string, unknown> }
 ) {
+  const existingId = String(payload.definition?.id ?? '').trim();
+  const skillId =
+    existingId || String(payload.definition?.skillId ?? '').trim();
+  const mergedSkill = {
+    ...(payload.definition ?? {}),
+    id: skillId,
+    name: payload.name,
+  } as Record<string, unknown>;
   return request.put<RawSkillItem>(
-    `${PREFIX}/skills/${encodeURIComponent(skillId)}`,
+    `${PREFIX}/skills/${encodeURIComponent(skillDefinitionId)}`,
     {
-      name: payload.name,
-      definition: payload.definition ?? {},
-    }
+      skill: mergedSkill,
+      updatedBy: 'portal',
+    },
+    { hideErrorTip: true }
   );
 }
 
@@ -753,11 +900,43 @@ export function reloadSkills() {
   return request.post(`${PREFIX}/skills/reload`, {});
 }
 
+export function invokeSkill(skillId: string, payload: InvokeSkillRequest) {
+  if (process.env.NEXT_PUBLIC_MOCK_SKILL_INVOKE === 'true') {
+    return Promise.resolve({
+      ok: true,
+      result: {
+        mocked: true,
+        echoedArguments: payload.arguments,
+      },
+      meta: {
+        traceId: payload.context.traceId,
+        skillId,
+        latencyMs: 0,
+        upstream: {
+          type: 'mock',
+        },
+      },
+    } as InvokeSkillResponse);
+  }
+  return request.post<InvokeSkillResponse>(
+    `${PREFIX}/skills/${encodeURIComponent(skillId)}/invoke`,
+    payload
+  );
+}
+
+export function applyPlanSkills(payload: ApplyPlanSkillsRequest) {
+  return request.post<ApplyPlanSkillsResponse>(
+    `${PREFIX}/skills/apply-plan`,
+    payload
+  );
+}
+
 export function executeFlow(payload: ExecuteFlowPayload) {
   const body: RawExecutionRequest = {
     dryRun: Boolean((payload as { dryRun?: boolean }).dryRun),
     input: payload.input,
     triggeredBy: (payload as { triggeredBy?: string }).triggeredBy,
+    executionOptions: payload.executionOptions,
   };
   if (payload.flowDefinitionId) {
     body.flowDefinitionId = payload.flowDefinitionId;

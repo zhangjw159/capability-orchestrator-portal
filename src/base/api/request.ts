@@ -44,7 +44,9 @@ export class Request {
             existing = [];
             this.activeAbortControllers.set(url, existing);
           }
-          existing.forEach((c) => c.abort());
+          existing.forEach((c) => {
+            c.abort();
+          });
           const controller = new AbortController();
           existing.push(controller);
           config.signal = controller.signal;
@@ -100,6 +102,9 @@ export class Request {
       (err) => {
         this.handleRequestId(err?.config as CustomAxiosRequestConfig);
         if (err?.code === 'ERR_CANCELED') return Promise.reject(err?.response);
+        if ((err?.config as CustomAxiosRequestConfig)?.hideErrorTip) {
+          return Promise.reject(err?.response);
+        }
         const message = this.getErrorMessage(err);
         notification.error({ message: 'Error', description: message });
         return Promise.reject(err?.response);
@@ -118,6 +123,14 @@ export class Request {
   }
 
   private getErrorMessage(err: any): string {
+    const data = err?.response?.data;
+    if (data && typeof data === 'object' && 'message' in data) {
+      const msg = String((data as { message?: string }).message ?? '');
+      const code = (data as { code?: unknown }).code;
+      if (msg && typeof code === 'string' && code) {
+        return `${msg} (${code})`;
+      }
+    }
     const status = err?.response?.status;
     const map: Record<number, string> = {
       400: err?.response?.data?.message || 'Bad Request',

@@ -9,6 +9,7 @@ import {
   Input,
   Select,
   Space,
+  Switch,
   Tag,
 } from 'antd';
 import TextArea from 'antd/es/input/TextArea';
@@ -34,15 +35,22 @@ import 'reactflow/dist/style.css';
 import { v4 as uuidv4 } from 'uuid';
 
 import {
+  applyPlanSkills,
   executeFlow,
+  listGovernanceSkills,
   planFlow,
   saveDefinition,
   validateFlow,
 } from '@/api/orchestrator';
 import { listTools } from '@/api/tools';
-import { extractToolsList, isValidationValid } from '@/lib/orchestrator';
+import {
+  extractToolsList,
+  isValidationValid,
+  normalizeSkillFieldInFlow,
+} from '@/lib/orchestrator';
 import { useOrchestratorPlanStore } from '@/store/orchestratorPlanStore';
 import type {
+  ApplyPlanStrategy,
   Flow,
   FlowNodeType,
   OrchestratorSkill,
@@ -77,7 +85,8 @@ function buildDefaultNodeConfig(
 ): Record<string, unknown> {
   if (type === 'tool') {
     return {
-      toolId: '',
+      mode: 'skill',
+      skillId: '',
       input: {},
       output: `${nodeId}_result`,
     };
@@ -117,14 +126,14 @@ function normalizeEditorFlow(flow: Flow): Flow {
     rawVersion === 'v1'
       ? DEFAULT_FLOW_VERSION
       : rawVersion;
-  return {
+  return normalizeSkillFieldInFlow({
     ...flow,
     version: normalizedVersion,
     input:
       flow.input && typeof flow.input === 'object' && !Array.isArray(flow.input)
         ? flow.input
         : { output: {} },
-  };
+  });
 }
 
 function parseJsonRecord(raw: string): Record<string, unknown> {
@@ -377,6 +386,9 @@ const FlowCanvasEditor = ({
   const [executing, setExecuting] = useState(false);
   const [inputText, setInputText] = useState('{}');
   const [executeResult, setExecuteResult] = useState<unknown>(null);
+  const [preferSkillExecutor, setPreferSkillExecutor] = useState(
+    process.env.NEXT_PUBLIC_ORCHESTRATOR_PREFER_SKILL_EXECUTOR !== 'false'
+  );
   const [toolOptions, setToolOptions] = useState<
     Array<{
       value: string;
@@ -387,12 +399,18 @@ const FlowCanvasEditor = ({
     }>
   >([]);
   const [toolInputText, setToolInputText] = useState('{}');
+  const [governanceSkillOptions, setGovernanceSkillOptions] = useState<
+    Array<{ value: string; label: string }>
+  >([]);
   const [toolInputError, setToolInputError] = useState<string | null>(null);
   const [refArgKey, setRefArgKey] = useState('');
   const [refOutputPath, setRefOutputPath] = useState('data');
   const [dslImportText, setDslImportText] = useState('');
   const [planContextText, setPlanContextText] = useState('{}');
   const [planConstraintsText, setPlanConstraintsText] = useState('{}');
+  const [applyPlanStrategy, setApplyPlanStrategy] =
+    useState<ApplyPlanStrategy>('upsert');
+  const [applyingPlan, setApplyingPlan] = useState(false);
   const {
     planInput,
     planResult,
@@ -443,6 +461,24 @@ const FlowCanvasEditor = ({
         );
       } catch {
         if (!cancelled) setToolOptions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await listGovernanceSkills();
+        if (cancelled) return;
+        setGovernanceSkillOptions(
+          list.map((item) => ({ value: item.id, label: item.name || item.id }))
+        );
+      } catch {
+        if (!cancelled) setGovernanceSkillOptions([]);
       }
     })();
     return () => {
@@ -634,7 +670,9 @@ const FlowCanvasEditor = ({
         edges,
         flowDraft.nodes
       );
-      const normalizedFlow = toFlow(flowDraft, nodes, normalizedEdges);
+      const normalizedFlow = normalizeSkillFieldInFlow(
+        toFlow(flowDraft, nodes, normalizedEdges)
+      );
       setEdges(normalizedEdges);
       setFlowDraft(normalizedFlow);
       const validation = await validateFlow(normalizedFlow);
@@ -665,9 +703,18 @@ const FlowCanvasEditor = ({
       const validation = await runValidate();
       if (validation.valid === false) return;
       const input = JSON.parse(inputText) as Record<string, unknown>;
+      const normalizedDraft = normalizeSkillFieldInFlow(flowDraft);
       const result = definitionId
-        ? await executeFlow({ flowDefinitionId: definitionId, input })
-        : await executeFlow({ flow: flowDraft, input });
+        ? await executeFlow({
+            flowDefinitionId: definitionId,
+            input,
+            executionOptions: { preferSkillExecutor },
+          })
+        : await executeFlow({
+            flow: normalizedDraft,
+            input,
+            executionOptions: { preferSkillExecutor },
+          });
       setExecuteResult(result);
       message.success('执行完成');
     } catch (error) {
@@ -675,7 +722,14 @@ const FlowCanvasEditor = ({
     } finally {
       setExecuting(false);
     }
-  }, [definitionId, flowDraft, inputText, message, runValidate]);
+  }, [
+    definitionId,
+    flowDraft,
+    inputText,
+    message,
+    preferSkillExecutor,
+    runValidate,
+  ]);
 
   const handleAutoConnect = useCallback(() => {
     if (nodes.length < 2) {
@@ -802,6 +856,39 @@ const FlowCanvasEditor = ({
     setPlanStatus,
     setValidationSource,
   ]);
+
+  const handleApplyPlanWithSkills = useCallback(async () => {
+    if (!planResult?.flow) {
+      message.warning('当前没有可应用的规划 Flow');
+      return;
+    }
+    setApplyingPlan(true);
+    try {
+      const planSkills = Array.isArray(planResult.skills)
+        ? planResult.skills
+        : [];
+      if (planSkills.length > 0) {
+        const applyResult = await applyPlanSkills({
+          strategy: applyPlanStrategy,
+          reload: true,
+          operator: 'portal',
+          skills: planSkills as Array<Record<string, unknown>>,
+        });
+        if (applyResult.summary.conflicted > 0) {
+          message.warning(
+            `Skills 存在冲突（${applyResult.summary.conflicted}），请切换策略后重试`
+          );
+          return;
+        }
+      }
+      applyPlannedFlow(planResult.flow);
+      message.success('已应用规划：Flow + Skills');
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '应用规划失败');
+    } finally {
+      setApplyingPlan(false);
+    }
+  }, [applyPlanStrategy, applyPlannedFlow, message, planResult]);
 
   const handleReloadDefinitionDsl = useCallback(async () => {
     if (!onReloadDefinitionDsl) return;
@@ -940,10 +1027,12 @@ const FlowCanvasEditor = ({
                   </Form.Item>
                   {String((selectedNode.config?.mode as string) ?? 'skill') ===
                   'skill' ? (
-                    <Form.Item label='config.skill'>
+                    <Form.Item label='config.skillId'>
                       <Select
                         value={String(
-                          (selectedNode.config?.skill as string) ?? ''
+                          (selectedNode.config?.skillId as string) ??
+                            (selectedNode.config?.skill as string) ??
+                            ''
                         )}
                         options={skills.map((skill) => ({
                           value: skill.skillId,
@@ -953,6 +1042,8 @@ const FlowCanvasEditor = ({
                           updateNode({
                             config: {
                               ...(selectedNode.config ?? {}),
+                              skillId: value,
+                              // backward compatible with old backend field name
                               skill: value,
                             },
                           })
@@ -1113,6 +1204,48 @@ const FlowCanvasEditor = ({
                       </Form.Item>
                     </>
                   )}
+                  <Form.Item label='governance.skillIds'>
+                    <Select
+                      mode='multiple'
+                      allowClear
+                      value={
+                        Array.isArray(selectedNode.config?.governanceSkillIds)
+                          ? (selectedNode.config
+                              ?.governanceSkillIds as string[])
+                          : []
+                      }
+                      options={governanceSkillOptions}
+                      onChange={(value) =>
+                        updateNode({
+                          config: {
+                            ...(selectedNode.config ?? {}),
+                            governanceSkillIds: value,
+                          },
+                        })
+                      }
+                    />
+                  </Form.Item>
+                  <Form.Item label='governance.mode'>
+                    <Select
+                      value={String(
+                        (selectedNode.config?.governanceMode as string) ??
+                          'warn'
+                      )}
+                      options={[
+                        { value: 'warn', label: 'warn' },
+                        { value: 'block', label: 'block' },
+                        { value: 'human-confirm', label: 'human-confirm' },
+                      ]}
+                      onChange={(value) =>
+                        updateNode({
+                          config: {
+                            ...(selectedNode.config ?? {}),
+                            governanceMode: value,
+                          },
+                        })
+                      }
+                    />
+                  </Form.Item>
                 </>
               ) : null}
               {selectedNode.type === 'template' ? (
@@ -1319,6 +1452,32 @@ const FlowCanvasEditor = ({
                     </Button>
                   ) : null}
                   {planResult?.flow ? (
+                    <>
+                      <Select
+                        value={applyPlanStrategy}
+                        style={{ minWidth: 170 }}
+                        options={[
+                          { value: 'upsert', label: 'upsert' },
+                          { value: 'create_only', label: 'create_only' },
+                          { value: 'skip_conflict', label: 'skip_conflict' },
+                          {
+                            value: 'rename_on_conflict',
+                            label: 'rename_on_conflict',
+                          },
+                        ]}
+                        onChange={(value) =>
+                          setApplyPlanStrategy(value as ApplyPlanStrategy)
+                        }
+                      />
+                      <Button
+                        loading={applyingPlan}
+                        onClick={() => void handleApplyPlanWithSkills()}
+                      >
+                        一键应用（Flow + Skills）
+                      </Button>
+                    </>
+                  ) : null}
+                  {planResult?.flow ? (
                     <Button
                       onClick={async () => {
                         const validation = await validateFlow(
@@ -1420,6 +1579,13 @@ const FlowCanvasEditor = ({
                   onChange={(e) => setInputText(e.target.value)}
                   placeholder='执行 input JSON'
                 />
+                <div className='flex items-center gap-2 text-xs text-neutral-600'>
+                  <Switch
+                    checked={preferSkillExecutor}
+                    onChange={setPreferSkillExecutor}
+                  />
+                  <span>执行链路开关：优先使用 Skill Executor</span>
+                </div>
                 <TextArea
                   rows={8}
                   value={dslImportText}
@@ -1453,9 +1619,15 @@ const FlowCanvasEditor = ({
             key: 'json',
             label: 'DSL JSON 预览',
             children: (
-              <pre className='max-h-80 overflow-auto rounded bg-neutral-50 p-3 text-xs'>
-                {JSON.stringify(flowDraft, null, 2)}
-              </pre>
+              <div className='flex flex-col gap-2'>
+                <Tag color='blue'>
+                  tool 节点 skill 模式使用 `config.skillId`（兼容保留
+                  `config.skill`）
+                </Tag>
+                <pre className='max-h-80 overflow-auto rounded bg-neutral-50 p-3 text-xs'>
+                  {JSON.stringify(flowDraft, null, 2)}
+                </pre>
+              </div>
             ),
           },
           {
