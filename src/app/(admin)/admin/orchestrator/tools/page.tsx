@@ -1,7 +1,7 @@
 'use client';
 
 import { PageContainer } from '@ant-design/pro-components';
-import { Button, message, Table, Tag } from 'antd';
+import { Alert, Button, message, Table, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 
@@ -206,6 +206,13 @@ const ToolsPage = () => {
         </Button>,
       ]}
     >
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="OpenAPI 注册的工具"
+        description="在「OpenAPI → MCP 导入」中上传文档后，工具会出现在本列表：服务为 openapi，来源为 openapi。若刚导入完，可点「重新加载」；点「刷新 MCP 工具」会同时从各 MCP 与 OpenAPI 侧汇总条数。"
+      />
       <Table<ToolRow>
         rowKey="_tableRowKey"
         loading={loading}

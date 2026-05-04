@@ -14,8 +14,11 @@ export interface FlowEdge {
   target?: string;
   from?: string;
   to?: string;
+  label?: string;
+  default?: boolean;
   sourceHandle?: string;
   targetHandle?: string;
+  [key: string]: unknown;
 }
 
 export interface FlowNode {

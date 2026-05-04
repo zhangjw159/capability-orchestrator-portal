@@ -57,15 +57,19 @@ import type {
   ValidationIssue,
 } from '@/types/orchestrator';
 
-const NODE_TYPES: FlowNodeType[] = [
-  'start',
-  'end',
-  'set',
-  'template',
-  'condition',
-  'tool',
-  'confirm',
-  'model',
+const NODE_TYPES: Array<{
+  type: FlowNodeType;
+  label: string;
+  description: string;
+}> = [
+  { type: 'start', label: 'start', description: '流程起点' },
+  { type: 'end', label: 'end', description: '流程终点' },
+  { type: 'set', label: 'set', description: '设置变量' },
+  { type: 'template', label: 'template', description: '模板渲染' },
+  { type: 'condition', label: 'condition', description: '条件判断' },
+  { type: 'tool', label: 'tool', description: '调用 skill/tool' },
+  { type: 'confirm', label: 'confirm', description: '人工确认分支' },
+  { type: 'model', label: 'model', description: '模型推理' },
 ];
 
 type Props = {
@@ -83,12 +87,24 @@ function buildDefaultNodeConfig(
   type: FlowNodeType,
   nodeId: string
 ): Record<string, unknown> {
+  if (type === 'start' || type === 'end') {
+    return {};
+  }
   if (type === 'tool') {
     return {
       mode: 'skill',
       skillId: '',
       input: {},
       output: `${nodeId}_result`,
+    };
+  }
+  if (type === 'condition') {
+    return {
+      condition: {
+        op: 'contains',
+        left: '$.output',
+        right: '""',
+      },
     };
   }
   if (type === 'template') {
@@ -114,7 +130,27 @@ function buildDefaultNodeConfig(
       value: '',
     };
   }
+  if (type === 'confirm') {
+    return {
+      message: '请确认后继续',
+      output: `${nodeId}_decision`,
+    };
+  }
   return {};
+}
+
+function buildDefaultNodeName(type: FlowNodeType): string {
+  const map: Record<FlowNodeType, string> = {
+    start: 'start',
+    end: 'end',
+    set: 'set value',
+    template: 'render template',
+    condition: 'check condition',
+    tool: 'invoke skill',
+    confirm: 'need confirm',
+    model: 'model infer',
+  };
+  return map[type];
 }
 
 function normalizeEditorFlow(flow: Flow): Flow {
@@ -366,6 +402,150 @@ function normalizeConfirmEdgeLabels(
   return labeled;
 }
 
+function normalizeConditionEdgeLabels(
+  inputEdges: Edge[],
+  flowNodes: Array<{ id: string; type: FlowNodeType }>
+): Edge[] {
+  const conditionNodeIdSet = new Set(
+    flowNodes.filter((node) => node.type === 'condition').map((node) => node.id)
+  );
+  const grouped = new Map<string, Edge[]>();
+  for (const edge of inputEdges) {
+    if (!conditionNodeIdSet.has(edge.source)) continue;
+    if (!grouped.has(edge.source)) grouped.set(edge.source, []);
+    grouped.get(edge.source)?.push(edge);
+  }
+
+  const labeled = [...inputEdges];
+  for (const outgoingEdges of grouped.values()) {
+    const hasTrue = outgoingEdges.some(
+      (edge) => String(edge.label ?? '').trim().toLowerCase() === 'true'
+    );
+    const hasDefault = outgoingEdges.some(
+      (edge) =>
+        String(edge.label ?? '').trim().toLowerCase() === 'default' ||
+        Boolean(
+          (
+            (edge.data as Record<string, unknown> | undefined)?.rawEdge as
+              | Record<string, unknown>
+              | undefined
+          )?.default === true
+        )
+    );
+
+    for (const edge of outgoingEdges) {
+      const current = String(edge.label ?? '').trim().toLowerCase();
+      const rawEdge =
+        edge.data && typeof edge.data === 'object'
+          ? ({
+              ...((edge.data as Record<string, unknown>).rawEdge as Record<
+                string,
+                unknown
+              >),
+            } as Record<string, unknown>)
+          : {};
+
+      if (current === 'default') {
+        rawEdge.default = true;
+      } else if (!hasTrue) {
+        edge.label = 'true';
+      } else if (!hasDefault) {
+        edge.label = 'default';
+        rawEdge.default = true;
+      }
+
+      edge.data = {
+        ...(edge.data as Record<string, unknown> | undefined),
+        rawEdge,
+      };
+    }
+  }
+  return labeled;
+}
+
+function normalizeBranchEdgeLabels(
+  inputEdges: Edge[],
+  flowNodes: Array<{ id: string; type: FlowNodeType }>
+): Edge[] {
+  return normalizeConditionEdgeLabels(
+    normalizeConfirmEdgeLabels(inputEdges, flowNodes),
+    flowNodes
+  );
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).sort(
+      ([a], [b]) => a.localeCompare(b)
+    );
+    return `{${entries
+      .map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function diffDsl(base: Flow, current: Flow): string[] {
+  const lines: string[] = [];
+  if (base.version !== current.version) lines.push('flow.version changed');
+  if (base.id !== current.id) lines.push(`flow.id: ${base.id} -> ${current.id}`);
+  if (base.name !== current.name) {
+    lines.push(`flow.name: ${base.name} -> ${current.name}`);
+  }
+  if (stableStringify(base.input ?? {}) !== stableStringify(current.input ?? {})) {
+    lines.push('flow.input changed');
+  }
+
+  const baseNodeMap = new Map(base.nodes.map((node) => [node.id, node]));
+  const currentNodeMap = new Map(current.nodes.map((node) => [node.id, node]));
+  for (const nodeId of baseNodeMap.keys()) {
+    if (!currentNodeMap.has(nodeId)) lines.push(`node removed: ${nodeId}`);
+  }
+  for (const nodeId of currentNodeMap.keys()) {
+    if (!baseNodeMap.has(nodeId)) lines.push(`node added: ${nodeId}`);
+  }
+  for (const [nodeId, node] of currentNodeMap.entries()) {
+    const oldNode = baseNodeMap.get(nodeId);
+    if (!oldNode) continue;
+    if (oldNode.type !== node.type) lines.push(`node.type changed: ${nodeId}`);
+    if ((oldNode.name ?? '') !== (node.name ?? '')) {
+      lines.push(`node.name changed: ${nodeId}`);
+    }
+    if (stableStringify(oldNode.config ?? {}) !== stableStringify(node.config ?? {})) {
+      lines.push(`node.config changed: ${nodeId}`);
+    }
+  }
+
+  const normalizeEdge = (edge: Flow['edges'][number]) => ({
+    id: edge.id ?? '',
+    from: String((edge.from ?? edge.source ?? '') as string),
+    to: String((edge.to ?? edge.target ?? '') as string),
+    label: String((edge.label ?? '') as string),
+    default: Boolean(edge.default),
+  });
+  const baseEdgeMap = new Map(base.edges.map((edge) => [edge.id, normalizeEdge(edge)]));
+  const currentEdgeMap = new Map(
+    current.edges.map((edge) => [edge.id, normalizeEdge(edge)])
+  );
+  for (const edgeId of baseEdgeMap.keys()) {
+    if (!currentEdgeMap.has(edgeId)) lines.push(`edge removed: ${edgeId}`);
+  }
+  for (const edgeId of currentEdgeMap.keys()) {
+    if (!baseEdgeMap.has(edgeId)) lines.push(`edge added: ${edgeId}`);
+  }
+  for (const [edgeId, edge] of currentEdgeMap.entries()) {
+    const oldEdge = baseEdgeMap.get(edgeId);
+    if (!oldEdge) continue;
+    if (stableStringify(oldEdge) !== stableStringify(edge)) {
+      lines.push(`edge changed: ${edgeId}`);
+    }
+  }
+  return lines;
+}
+
 const FlowCanvasEditor = ({
   definitionId,
   initialFlow,
@@ -406,6 +586,8 @@ const FlowCanvasEditor = ({
   const [refArgKey, setRefArgKey] = useState('');
   const [refOutputPath, setRefOutputPath] = useState('data');
   const [dslImportText, setDslImportText] = useState('');
+  const [baselineFlow, setBaselineFlow] = useState<Flow>(initialFlow);
+  const [dslDiffText, setDslDiffText] = useState('');
   const [planContextText, setPlanContextText] = useState('{}');
   const [planConstraintsText, setPlanConstraintsText] = useState('{}');
   const [applyPlanStrategy, setApplyPlanStrategy] =
@@ -429,9 +611,11 @@ const FlowCanvasEditor = ({
   useEffect(() => {
     const normalizedInitial = normalizeEditorFlow(initialFlow);
     const mapped = toCanvas(normalizedInitial);
+    setBaselineFlow(normalizedInitial);
     setFlowDraft(normalizedInitial);
     setNodes(mapped.nodes);
-    setEdges(normalizeConfirmEdgeLabels(mapped.edges, normalizedInitial.nodes));
+    setEdges(normalizeBranchEdgeLabels(mapped.edges, normalizedInitial.nodes));
+    setDslDiffText('');
   }, [initialFlow]);
 
   useEffect(() => {
@@ -527,7 +711,7 @@ const FlowCanvasEditor = ({
   const onEdgesChange = useCallback(
     (changes: EdgeChange[]) => {
       setEdges((current) =>
-        normalizeConfirmEdgeLabels(
+        normalizeBranchEdgeLabels(
           applyEdgeChanges(changes, current),
           flowDraft.nodes
         )
@@ -538,7 +722,7 @@ const FlowCanvasEditor = ({
   const onConnect = useCallback(
     (connection: Edge | Connection) => {
       setEdges((current) =>
-        normalizeConfirmEdgeLabels(
+        normalizeBranchEdgeLabels(
           addEdge(
             {
               ...connection,
@@ -579,7 +763,7 @@ const FlowCanvasEditor = ({
           {
             id,
             type,
-            name: `${type}-${id}`,
+            name: buildDefaultNodeName(type),
             config: buildDefaultNodeConfig(type, id),
           },
         ],
@@ -666,7 +850,7 @@ const FlowCanvasEditor = ({
     setSaving(true);
     try {
       // 保存前再次强规范 confirm 分支，避免 true/false 因空格或大小写导致执行期不匹配
-      const normalizedEdges = normalizeConfirmEdgeLabels(
+      const normalizedEdges = normalizeBranchEdgeLabels(
         edges,
         flowDraft.nodes
       );
@@ -689,6 +873,8 @@ const FlowCanvasEditor = ({
         flowId: normalizedFlow.id,
         dsl: normalizedFlow,
       });
+      setBaselineFlow(normalizedFlow);
+      setDslDiffText('');
       message.success('保存成功');
       onSaved?.();
       router.refresh();
@@ -749,7 +935,7 @@ const FlowCanvasEditor = ({
         markerEnd: { type: MarkerType.ArrowClosed },
       });
     }
-    setEdges(normalizeConfirmEdgeLabels(generated, flowDraft.nodes));
+    setEdges(normalizeBranchEdgeLabels(generated, flowDraft.nodes));
     message.success('已按节点顺序自动连线');
   }, [flowDraft.nodes, message, nodes]);
 
@@ -772,9 +958,11 @@ const FlowCanvasEditor = ({
       const mapped = toCanvas(normalized);
       setFlowDraft(normalized);
       setNodes(mapped.nodes);
-      setEdges(normalizeConfirmEdgeLabels(mapped.edges, normalized.nodes));
+      setEdges(normalizeBranchEdgeLabels(mapped.edges, normalized.nodes));
       setSelectedNodeId(undefined);
       setSelectedEdgeId(undefined);
+      setBaselineFlow(normalized);
+      setDslDiffText('');
       message.success('已根据 DSL 自动生成画板元素');
     } catch (error) {
       message.error(
@@ -793,9 +981,10 @@ const FlowCanvasEditor = ({
       const mapped = toCanvas(normalized);
       setFlowDraft(normalized);
       setNodes(mapped.nodes);
-      setEdges(normalizeConfirmEdgeLabels(mapped.edges, normalized.nodes));
+      setEdges(normalizeBranchEdgeLabels(mapped.edges, normalized.nodes));
       setSelectedNodeId(undefined);
       setSelectedEdgeId(undefined);
+      setDslDiffText('');
       message.success('已将规划结果应用到画布');
     },
     [message]
@@ -902,9 +1091,11 @@ const FlowCanvasEditor = ({
       const mapped = toCanvas(normalized);
       setFlowDraft(normalized);
       setNodes(mapped.nodes);
-      setEdges(normalizeConfirmEdgeLabels(mapped.edges, normalized.nodes));
+      setEdges(normalizeBranchEdgeLabels(mapped.edges, normalized.nodes));
       setSelectedNodeId(undefined);
       setSelectedEdgeId(undefined);
+      setBaselineFlow(normalized);
+      setDslDiffText('');
       message.success('已从当前定义重新加载 DSL');
     } catch {
       message.error('重新加载 DSL 失败');
@@ -928,9 +1119,18 @@ const FlowCanvasEditor = ({
       <div className='grid grid-cols-12 gap-4'>
         <Card className='col-span-2' title='节点库' size='small'>
           <Space direction='vertical' className='w-full'>
-            {NODE_TYPES.map((type) => (
-              <Button key={type} block onClick={() => handleAddNode(type)}>
-                {type}
+            {NODE_TYPES.map((item) => (
+              <Button
+                key={item.type}
+                block
+                onClick={() => handleAddNode(item.type)}
+              >
+                <div className='flex flex-col items-start leading-tight'>
+                  <span>{item.label}</span>
+                  <span className='text-[11px] text-neutral-500'>
+                    {item.description}
+                  </span>
+                </div>
               </Button>
             ))}
           </Space>
@@ -984,11 +1184,17 @@ const FlowCanvasEditor = ({
               <Form.Item label='节点类型'>
                 <Select
                   value={selectedNode.type}
-                  options={NODE_TYPES.map((type) => ({
-                    value: type,
-                    label: type,
+                  options={NODE_TYPES.map((item) => ({
+                    value: item.type,
+                    label: item.label,
                   }))}
-                  onChange={(value) => updateNode({ type: value })}
+                  onChange={(value) =>
+                    updateNode({
+                      type: value,
+                      config: buildDefaultNodeConfig(value, selectedNode.id),
+                      name: buildDefaultNodeName(value),
+                    })
+                  }
                 />
               </Form.Item>
               <Form.Item label='节点名称'>
@@ -1540,6 +1746,24 @@ const FlowCanvasEditor = ({
               <div className='flex flex-col gap-3'>
                 <Space wrap>
                   <Button onClick={runValidate}>校验</Button>
+                  <Button
+                    onClick={() => {
+                      const changes = diffDsl(baselineFlow, flowDraft);
+                      if (changes.length === 0) {
+                        setDslDiffText('与原始 DSL 一致（未检测到差异）');
+                        message.success('DSL 回归校验通过');
+                        return;
+                      }
+                      setDslDiffText(
+                        changes
+                          .map((line, index) => `${index + 1}. ${line}`)
+                          .join('\n')
+                      );
+                      message.warning(`检测到 ${changes.length} 处 DSL 差异`);
+                    }}
+                  >
+                    DSL 回归校验
+                  </Button>
                   <Button onClick={handleAutoConnect}>一键自动连线</Button>
                   {onReloadDefinitionDsl ? (
                     <Button onClick={handleReloadDefinitionDsl}>
@@ -1611,6 +1835,11 @@ const FlowCanvasEditor = ({
                       </Tag>
                     ))}
                   </div>
+                ) : null}
+                {dslDiffText ? (
+                  <pre className='max-h-56 overflow-auto rounded bg-neutral-50 p-3 text-xs'>
+                    {dslDiffText}
+                  </pre>
                 ) : null}
               </div>
             ),

@@ -49,6 +49,13 @@ const OrchestratorHome: React.FC = () => (
         </Card>
       </Link>
     </Col>
+    <Col xs={24} md={12}>
+      <Link href='/admin/orchestrator/openapi-import'>
+        <Card hoverable title='OpenAPI → MCP 导入'>
+          上传 OpenAPI 文档，自动注册为 MCP HTTP 工具（path / query / header / body 拼装）。
+        </Card>
+      </Link>
+    </Col>
   </Row>
 );
 

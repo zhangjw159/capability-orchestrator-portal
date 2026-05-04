@@ -1,15 +1,105 @@
 import type { Flow, RegisteredTool } from '@/types/orchestrator';
 
+function parseJsonRecord(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== 'string' || !raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return parsed as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function toRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function normalizeNodeType(raw: unknown): Flow['nodes'][number]['type'] {
+  const text = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s-]+/g, '');
+  const mapping: Record<string, Flow['nodes'][number]['type']> = {
+    start: 'start',
+    end: 'end',
+    set: 'set',
+    template: 'template',
+    condition: 'condition',
+    confirm: 'confirm',
+    tool: 'tool',
+    model: 'model',
+  };
+  return mapping[text] ?? 'set';
+}
+
+function normalizeFlowShape(raw: Record<string, unknown>): Flow {
+  const nodes = Array.isArray(raw.nodes) ? raw.nodes : [];
+  const edges = Array.isArray(raw.edges) ? raw.edges : [];
+  const input =
+    toRecord(raw.input_json).output != null
+      ? toRecord(raw.input_json)
+      : toRecord(raw.input).output != null
+        ? toRecord(raw.input)
+        : parseJsonRecord(raw.input_json).output != null
+          ? parseJsonRecord(raw.input_json)
+          : toRecord(raw.input);
+
+  return {
+    version: String(raw.version ?? 'flow/v1'),
+    id: String(raw.id ?? ''),
+    name: String(raw.name ?? ''),
+    input: Object.keys(input).length > 0 ? input : { output: {} },
+    nodes: nodes
+      .filter((item) => item && typeof item === 'object')
+      .map((item) => {
+        const node = item as Record<string, unknown>;
+        const config =
+          Object.keys(toRecord(node.config)).length > 0
+            ? toRecord(node.config)
+            : parseJsonRecord(node.config_json);
+        return {
+          id: String(node.id ?? ''),
+          type: normalizeNodeType(node.type ?? node.node_type),
+          name: node.name != null ? String(node.name) : undefined,
+          description: node.description != null ? String(node.description) : undefined,
+          config,
+        };
+      }),
+    edges: edges
+      .filter((item) => item && typeof item === 'object')
+      .map((item) => {
+        const edge = item as Record<string, unknown>;
+        const from = String(edge.from ?? edge.source ?? '');
+        const to = String(edge.to ?? edge.target ?? '');
+        const next: Record<string, unknown> = {
+          ...edge,
+          id: String(edge.id ?? ''),
+          from,
+          to,
+        };
+        delete next.source;
+        delete next.target;
+        return next as Flow['edges'][number];
+      }),
+  };
+}
+
 export function parseFlowDsl(dsl: unknown): Flow | null {
   if (dsl == null) return null;
   if (typeof dsl === 'string') {
     try {
-      return JSON.parse(dsl) as Flow;
+      const parsed = JSON.parse(dsl) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      return normalizeFlowShape(parsed as Record<string, unknown>);
     } catch {
       return null;
     }
   }
-  if (typeof dsl === 'object') return dsl as Flow;
+  if (typeof dsl === 'object' && !Array.isArray(dsl)) {
+    return normalizeFlowShape(dsl as Record<string, unknown>);
+  }
   return null;
 }
 

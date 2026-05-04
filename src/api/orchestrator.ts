@@ -88,6 +88,7 @@ type RawFlowEdge = {
   to?: string;
   label?: string;
   default?: boolean;
+  [key: string]: unknown;
 };
 
 type RawFlow = {
@@ -367,19 +368,25 @@ function toCoreFlow(flow: Flow): RawFlow {
       type: node.type,
       config: node.config ?? {},
     })),
-    edges: (flow.edges ?? []).map((edge) => ({
-      id: edge.id,
-      from:
+    edges: (flow.edges ?? []).map((edge) => {
+      const cloned = { ...(edge as Record<string, unknown>) };
+      const from =
         (edge as { from?: string }).from ??
         (edge as { source?: string }).source ??
-        '',
-      to:
+        '';
+      const to =
         (edge as { to?: string }).to ??
         (edge as { target?: string }).target ??
-        '',
-      label: (edge as { label?: string }).label,
-      default: (edge as { default?: boolean }).default,
-    })),
+        '';
+      delete cloned.source;
+      delete cloned.target;
+      return {
+        ...cloned,
+        id: edge.id,
+        from,
+        to,
+      } as RawFlowEdge;
+    }),
   };
 }
 
@@ -397,6 +404,7 @@ function toFlow(raw: RawFlow): Flow {
       config: toRecord(node.config),
     })),
     edges: (raw.edges ?? []).map((edge) => ({
+      ...edge,
       id: edge.id ?? '',
       from: edge.from ?? '',
       to: edge.to ?? '',
@@ -470,14 +478,15 @@ function buildSaveFlowDefinitionRequest(
       ),
     })),
     edges: (flowCandidate.edges ?? []).map((edge) => ({
+      ...(edge as Record<string, unknown>),
       id: edge.id ?? '',
-      source:
-        (edge as { source?: string }).source ??
+      from:
         (edge as { from?: string }).from ??
+        (edge as { source?: string }).source ??
         '',
-      target:
-        (edge as { target?: string }).target ??
+      to:
         (edge as { to?: string }).to ??
+        (edge as { target?: string }).target ??
         '',
     })),
   };
