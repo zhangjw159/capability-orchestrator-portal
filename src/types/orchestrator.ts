@@ -6,7 +6,8 @@ export type FlowNodeType =
   | 'condition'
   | 'tool'
   | 'confirm'
-  | 'model';
+  | 'model'
+  | 'foreach';
 
 export interface FlowEdge {
   id: string;

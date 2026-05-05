@@ -7,6 +7,7 @@ import {
   Collapse,
   Form,
   Input,
+  InputNumber,
   Select,
   Space,
   Switch,
@@ -44,9 +45,11 @@ import {
 } from '@/api/orchestrator';
 import { listTools } from '@/api/tools';
 import {
+  collectForeachExclusiveNodeIds,
   extractToolsList,
   isValidationValid,
   normalizeSkillFieldInFlow,
+  validateForeachExclusiveEdges,
 } from '@/lib/orchestrator';
 import { useOrchestratorPlanStore } from '@/store/orchestratorPlanStore';
 import type {
@@ -70,6 +73,11 @@ const NODE_TYPES: Array<{
   { type: 'tool', label: 'tool', description: '调用 skill/tool' },
   { type: 'confirm', label: 'confirm', description: '人工确认分支' },
   { type: 'model', label: 'model', description: '模型推理' },
+  {
+    type: 'foreach',
+    label: 'foreach',
+    description: '遍历数组，依次执行步骤节点（步骤节点勿连线）',
+  },
 ];
 
 type Props = {
@@ -126,8 +134,18 @@ function buildDefaultNodeConfig(
   }
   if (type === 'set') {
     return {
-      output: `${nodeId}_value`,
+      path: `${nodeId}_value`,
       value: '',
+      parseJson: false,
+    };
+  }
+  if (type === 'foreach') {
+    return {
+      sourcePath: 'work.items',
+      itemPath: 'loop.item',
+      indexPath: 'loop.index',
+      steps: [] as string[],
+      maxIterations: 32,
     };
   }
   if (type === 'confirm') {
@@ -149,6 +167,7 @@ function buildDefaultNodeName(type: FlowNodeType): string {
     tool: 'invoke skill',
     confirm: 'need confirm',
     model: 'model infer',
+    foreach: 'foreach loop',
   };
   return map[type];
 }
@@ -252,14 +271,29 @@ function toConfigInput(
   return editableInput;
 }
 
-const FlowNodeCard = ({ data }: { data: { label?: string } }) => (
-  <div className='rounded border border-neutral-300 bg-white px-3 py-2 text-xs shadow-sm'>
+const FlowNodeCard = ({
+  data,
+}: {
+  data: { label?: string; isForeachBody?: boolean };
+}) => (
+  <div
+    className={`rounded border px-3 py-2 text-xs shadow-sm ${
+      data?.isForeachBody
+        ? 'border-amber-400 bg-amber-50'
+        : 'border-neutral-300 bg-white'
+    }`}
+  >
     <Handle
       type='target'
       position={Position.Top}
       style={{ width: 8, height: 8, background: '#1677ff' }}
     />
     <div className='text-neutral-800'>{data?.label ?? 'node'}</div>
+    {data?.isForeachBody ? (
+      <Tag color='orange' className='mt-1'>
+        foreach 步骤
+      </Tag>
+    ) : null}
     <Handle
       type='source'
       position={Position.Bottom}
@@ -269,13 +303,17 @@ const FlowNodeCard = ({ data }: { data: { label?: string } }) => (
 );
 
 function toCanvas(flow: Flow): { nodes: Node[]; edges: Edge[] } {
+  const exclusive = collectForeachExclusiveNodeIds(flow);
   const nodes: Node[] = (flow.nodes ?? []).map((node, index) => ({
     id: node.id,
     position: {
       x: 120 + (index % 4) * 220,
       y: 80 + Math.floor(index / 4) * 120,
     },
-    data: { label: node.name || `${node.type}:${node.id}` },
+    data: {
+      label: node.name || `${node.type}:${node.id}`,
+      isForeachBody: exclusive.has(node.id),
+    },
     style: {
       borderRadius: 8,
       border: '1px solid #d9d9d9',
@@ -721,6 +759,18 @@ const FlowCanvasEditor = ({
   );
   const onConnect = useCallback(
     (connection: Edge | Connection) => {
+      const source = String(connection.source ?? '');
+      const target = String(connection.target ?? '');
+      const synthetic = normalizeSkillFieldInFlow(
+        toFlow(flowDraft, nodes, edges)
+      );
+      const exclusive = collectForeachExclusiveNodeIds(synthetic);
+      if (exclusive.has(source) || exclusive.has(target)) {
+        message.warning(
+          'foreach 步骤节点只能通过 foreach.config.steps 调度，不能手动连线'
+        );
+        return;
+      }
       setEdges((current) =>
         normalizeBranchEdgeLabels(
           addEdge(
@@ -735,7 +785,7 @@ const FlowCanvasEditor = ({
         )
       );
     },
-    [flowDraft.nodes]
+    [edges, flowDraft, message, nodes]
   );
 
   const handleAddNode = useCallback(
@@ -835,15 +885,25 @@ const FlowCanvasEditor = ({
   ]);
 
   const runValidate = useCallback(async () => {
+    const local = validateForeachExclusiveEdges(flowDraft);
     const res = await validateFlow(flowDraft);
-    const issues = [...(res.errorIssues ?? []), ...(res.warningIssues ?? [])];
+    const issues = [
+      ...local,
+      ...(res.errorIssues ?? []),
+      ...(res.warningIssues ?? []),
+    ];
     setValidateIssues(issues);
-    if (res.valid === false) {
-      message.error(res.message || '校验未通过');
+    const ok = local.length === 0 && res.valid !== false;
+    if (!ok) {
+      message.error(
+        local.length > 0
+          ? '存在 foreach 步骤节点连线（步骤节点不应出现在 edges）'
+          : res.message || '校验未通过'
+      );
     } else {
       message.success('校验通过');
     }
-    return res;
+    return { ...res, valid: ok };
   }, [flowDraft, message]);
 
   const handleSave = useCallback(async () => {
@@ -857,6 +917,14 @@ const FlowCanvasEditor = ({
       const normalizedFlow = normalizeSkillFieldInFlow(
         toFlow(flowDraft, nodes, normalizedEdges)
       );
+      const foreachIssues = validateForeachExclusiveEdges(normalizedFlow);
+      if (foreachIssues.length > 0) {
+        setValidateIssues(foreachIssues);
+        message.error(
+          '存在 foreach 步骤节点连线，请先删除相关边或在 foreach 中调整 steps'
+        );
+        return;
+      }
       setEdges(normalizedEdges);
       setFlowDraft(normalizedFlow);
       const validation = await validateFlow(normalizedFlow);
@@ -1491,6 +1559,176 @@ const FlowCanvasEditor = ({
                   </Form.Item>
                 </>
               ) : null}
+              {selectedNode.type === 'set' ? (
+                <>
+                  <Form.Item
+                    label='config.path'
+                    extra='与后端 set 一致；若历史 DSL 使用 output 可在 JSON 中保留，建议改为 path'
+                  >
+                    <Input
+                      value={String(
+                        (selectedNode.config?.path as string) ??
+                          (selectedNode.config?.output as string) ??
+                          ''
+                      )}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        const next = {
+                          ...(selectedNode.config ?? {}),
+                          path: v,
+                        };
+                        delete (next as Record<string, unknown>).output;
+                        updateNode({ config: next });
+                      }}
+                      placeholder='例如 work.parsed 或 driver.id'
+                    />
+                  </Form.Item>
+                  <Form.Item label='value（支持 Go 模板）'>
+                    <TextArea
+                      rows={4}
+                      value={String((selectedNode.config?.value as string) ?? '')}
+                      onChange={(e) =>
+                        updateNode({
+                          config: {
+                            ...(selectedNode.config ?? {}),
+                            value: e.target.value,
+                          },
+                        })
+                      }
+                    />
+                  </Form.Item>
+                  <Form.Item
+                    label='parseJson'
+                    valuePropName='checked'
+                    extra='为 true 时先将 value 当字符串做 JSON 解析，再写入 path'
+                  >
+                    <Switch
+                      checked={Boolean(selectedNode.config?.parseJson)}
+                      onChange={(checked) =>
+                        updateNode({
+                          config: {
+                            ...(selectedNode.config ?? {}),
+                            parseJson: checked,
+                          },
+                        })
+                      }
+                    />
+                  </Form.Item>
+                </>
+              ) : null}
+              {selectedNode.type === 'foreach' ? (
+                <>
+                  <Form.Item
+                    label='sourcePath'
+                    extra='变量中数组路径，可带 $. 前缀，如 work.order_groups'
+                  >
+                    <Input
+                      value={String(
+                        (selectedNode.config?.sourcePath as string) ?? ''
+                      )}
+                      onChange={(e) =>
+                        updateNode({
+                          config: {
+                            ...(selectedNode.config ?? {}),
+                            sourcePath: e.target.value,
+                          },
+                        })
+                      }
+                    />
+                  </Form.Item>
+                  <Form.Item label='itemPath' extra='每次迭代当前元素，如 loop.item'>
+                    <Input
+                      value={String(
+                        (selectedNode.config?.itemPath as string) ?? ''
+                      )}
+                      onChange={(e) =>
+                        updateNode({
+                          config: {
+                            ...(selectedNode.config ?? {}),
+                            itemPath: e.target.value,
+                          },
+                        })
+                      }
+                    />
+                  </Form.Item>
+                  <Form.Item label='indexPath' extra='可选，0 起下标，如 loop.index'>
+                    <Input
+                      value={String(
+                        (selectedNode.config?.indexPath as string) ?? ''
+                      )}
+                      onChange={(e) =>
+                        updateNode({
+                          config: {
+                            ...(selectedNode.config ?? {}),
+                            indexPath: e.target.value,
+                          },
+                        })
+                      }
+                    />
+                  </Form.Item>
+                  <Form.Item
+                    label='steps（节点 ID 顺序）'
+                    extra='从本流程已存在的节点中多选；这些节点在图上不能有连线'
+                  >
+                    <Select
+                      mode='multiple'
+                      allowClear
+                      style={{ width: '100%' }}
+                      placeholder='选择要循环执行的节点'
+                      value={
+                        Array.isArray(selectedNode.config?.steps)
+                          ? (selectedNode.config?.steps as string[])
+                          : []
+                      }
+                      options={flowDraft.nodes
+                        .filter(
+                          (n) =>
+                            n.id !== selectedNode.id &&
+                            n.type !== 'foreach' &&
+                            n.type !== 'start' &&
+                            n.type !== 'end' &&
+                            n.type !== 'condition' &&
+                            n.type !== 'confirm'
+                        )
+                        .map((n) => ({
+                          value: n.id,
+                          label: `${n.type}: ${n.id}`,
+                        }))}
+                      onChange={(value) =>
+                        updateNode({
+                          config: {
+                            ...(selectedNode.config ?? {}),
+                            steps: value,
+                          },
+                        })
+                      }
+                    />
+                  </Form.Item>
+                  <Form.Item
+                    label='maxIterations'
+                    extra='未设置时源数组超过 32 条仅执行前 32 次'
+                  >
+                    <InputNumber
+                      min={1}
+                      max={500}
+                      value={
+                        typeof selectedNode.config?.maxIterations === 'number'
+                          ? (selectedNode.config
+                              .maxIterations as number)
+                          : undefined
+                      }
+                      onChange={(v) =>
+                        updateNode({
+                          config: {
+                            ...(selectedNode.config ?? {}),
+                            maxIterations: v ?? undefined,
+                          },
+                        })
+                      }
+                    />
+                  </Form.Item>
+                </>
+              ) : null}
               {selectedNode.type === 'model' ? (
                 <>
                   <Form.Item label='meta.model'>
@@ -1686,11 +1924,12 @@ const FlowCanvasEditor = ({
                   {planResult?.flow ? (
                     <Button
                       onClick={async () => {
-                        const validation = await validateFlow(
-                          planResult.flow as Flow
-                        );
+                        const planFlow = planResult.flow as Flow;
+                        const localFe = validateForeachExclusiveEdges(planFlow);
+                        const validation = await validateFlow(planFlow);
                         setValidationSource('backend-validate');
                         const issues = [
+                          ...localFe,
                           ...(validation.errorIssues ?? []),
                           ...(validation.warningIssues ?? []),
                         ];

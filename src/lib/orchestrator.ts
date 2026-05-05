@@ -1,4 +1,4 @@
-import type { Flow, RegisteredTool } from '@/types/orchestrator';
+import type { Flow, RegisteredTool, ValidationIssue } from '@/types/orchestrator';
 
 function parseJsonRecord(raw: unknown): Record<string, unknown> {
   if (typeof raw !== 'string' || !raw.trim()) return {};
@@ -30,8 +30,43 @@ function normalizeNodeType(raw: unknown): Flow['nodes'][number]['type'] {
     confirm: 'confirm',
     tool: 'tool',
     model: 'model',
+    foreach: 'foreach',
   };
   return mapping[text] ?? 'set';
+}
+
+/** 出现在任一 foreach.config.steps 中的节点：主图上不允许有任何边（仅由 foreach 调度）。 */
+export function collectForeachExclusiveNodeIds(flow: Flow): Set<string> {
+  const out = new Set<string>();
+  for (const node of flow.nodes ?? []) {
+    if (node.type !== 'foreach') continue;
+    const steps = node.config?.steps;
+    if (!Array.isArray(steps)) continue;
+    for (const s of steps) {
+      if (typeof s === 'string' && s.trim()) out.add(s.trim());
+    }
+  }
+  return out;
+}
+
+export function validateForeachExclusiveEdges(flow: Flow): ValidationIssue[] {
+  const exclusive = collectForeachExclusiveNodeIds(flow);
+  if (exclusive.size === 0) return [];
+  const issues: ValidationIssue[] = [];
+  for (const edge of flow.edges ?? []) {
+    const raw = edge as Record<string, unknown>;
+    const from = String(raw.from ?? raw.source ?? '').trim();
+    const to = String(raw.to ?? raw.target ?? '').trim();
+    if (!from || !to) continue;
+    if (exclusive.has(from) || exclusive.has(to)) {
+      issues.push({
+        code: 'foreach_body_edge',
+        edgeId: typeof raw.id === 'string' ? raw.id : undefined,
+        message: `边涉及 foreach 步骤节点（${from}→${to}）：步骤节点不应出现在 edges 中，请删除连线`,
+      });
+    }
+  }
+  return issues;
 }
 
 function normalizeFlowShape(raw: Record<string, unknown>): Flow {
