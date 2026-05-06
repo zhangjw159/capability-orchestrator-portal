@@ -393,3 +393,50 @@ export interface GovernanceDecision {
   createdAt: string;
   decidedAt?: string;
 }
+
+export interface ConfirmQuotaVehicleCatalogItem {
+  itemId?: string;
+  priceText?: string;
+  remark?: string;
+}
+
+export interface ConfirmQuotaMatchedCatalog {
+  itemId?: string;
+  category?: string;
+  matchReason?: string;
+}
+
+export interface ConfirmQuotaItem {
+  orderGroupId?: string;
+  service?: string;
+  vehicleType?: string;
+  currency?: string;
+  vehicleCount?: number;
+  deliveryDatetime?: string;
+  collectionDatetime?: string;
+  deliveryLocation?: string;
+  collectionLocation?: string;
+  rentalDays?: number;
+  dailyRateText?: string;
+  deliveryCollectionFeePerWayText?: string;
+  estimatedTotalBeforeGstText?: string;
+  corporateId?: string;
+  companyName?: string;
+  matchedCatalog?: ConfirmQuotaMatchedCatalog;
+  vehicleCatalog?: ConfirmQuotaVehicleCatalogItem[];
+}
+
+export interface ConfirmQuotaAction {
+  actionName?: string;
+  actionPath?: string;
+}
+
+export interface ConfirmQuotaGroup {
+  analysisResultId?: string;
+  action?: ConfirmQuotaAction;
+  items: ConfirmQuotaItem[];
+}
+
+export interface ConfirmQuotaQueryResult {
+  groups: ConfirmQuotaGroup[];
+}

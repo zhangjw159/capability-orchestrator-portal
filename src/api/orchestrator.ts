@@ -10,6 +10,7 @@ import type {
   Flow,
   FlowDefinitionDetail,
   FlowDefinitionSummary,
+  ConfirmQuotaQueryResult,
   GovernanceDecision,
   GovernanceReportResponse,
   GovernanceReviewResponse,
@@ -24,6 +25,7 @@ import type {
 } from '@/types/orchestrator';
 
 const PREFIX = '/api/v1/orchestrator';
+const PHV_ADMIN_SIT_BASE_URL = 'https://sit-phv-admin-service.fms-sit.lylo.tech';
 
 type RawValidationIssue = {
   code?: string;
@@ -265,6 +267,51 @@ type RawListExecutionsResponse = {
 type RawGetExecutionDetailResponse = {
   execution?: RawExecutionItem;
   steps?: RawExecutionStepItem[];
+};
+
+type RawConfirmQuotaVehicleCatalogItem = {
+  item_id?: string;
+  price_text?: string;
+  remark?: string;
+};
+
+type RawConfirmQuotaMatchedCatalog = {
+  item_id?: string;
+  category?: string;
+  match_reason?: string;
+};
+
+type RawConfirmQuotaItem = {
+  order_group_id?: string;
+  service?: string;
+  vehicle_type?: string;
+  currency?: string;
+  vehicle_count?: number;
+  delivery_datetime?: string;
+  collection_datetime?: string;
+  delivery_location?: string;
+  collection_location?: string;
+  rental_days?: number;
+  daily_rate_text?: string;
+  delivery_collection_fee_per_way_text?: string;
+  estimated_total_before_gst_text?: string;
+  corporate_id?: string;
+  company_name?: string;
+  matched_catalog?: RawConfirmQuotaMatchedCatalog;
+  vehicle_catalog?: RawConfirmQuotaVehicleCatalogItem[];
+};
+
+type RawConfirmQuotaAction = {
+  action_name?: string;
+  action_path?: string;
+};
+
+type RawConfirmQuotaResponse = {
+  groups?: Array<{
+    items?: RawConfirmQuotaItem[];
+    action?: RawConfirmQuotaAction;
+    analysis_result_id?: string;
+  }>;
 };
 
 export type DefaultTemplate = {
@@ -526,6 +573,49 @@ function toExecutionStep(raw: RawExecutionStepItem): ExecutionStep {
     finishedAt: raw.finished_at,
     nodeType: raw.node_type,
     transition: raw.transition,
+  };
+}
+
+function toConfirmQuotaResult(raw?: RawConfirmQuotaResponse): ConfirmQuotaQueryResult {
+  return {
+    groups: (raw?.groups ?? []).map((group) => ({
+      analysisResultId: group.analysis_result_id,
+      action: group.action
+        ? {
+            actionName: group.action.action_name,
+            actionPath: group.action.action_path,
+          }
+        : undefined,
+      items: (group.items ?? []).map((item) => ({
+        orderGroupId: item.order_group_id,
+        service: item.service,
+        vehicleType: item.vehicle_type,
+        currency: item.currency,
+        vehicleCount: item.vehicle_count,
+        deliveryDatetime: item.delivery_datetime,
+        collectionDatetime: item.collection_datetime,
+        deliveryLocation: item.delivery_location,
+        collectionLocation: item.collection_location,
+        rentalDays: item.rental_days,
+        dailyRateText: item.daily_rate_text,
+        deliveryCollectionFeePerWayText: item.delivery_collection_fee_per_way_text,
+        estimatedTotalBeforeGstText: item.estimated_total_before_gst_text,
+        corporateId: item.corporate_id,
+        companyName: item.company_name,
+        matchedCatalog: item.matched_catalog
+          ? {
+              itemId: item.matched_catalog.item_id,
+              category: item.matched_catalog.category,
+              matchReason: item.matched_catalog.match_reason,
+            }
+          : undefined,
+        vehicleCatalog: (item.vehicle_catalog ?? []).map((catalog) => ({
+          itemId: catalog.item_id,
+          priceText: catalog.price_text,
+          remark: catalog.remark,
+        })),
+      })),
+    })),
   };
 }
 
@@ -990,4 +1080,23 @@ export function getExecution(executionId: string) {
       };
       return detail;
     });
+}
+
+export function queryConfirmQuotationByEmail(payload: { email: string }) {
+  return request
+    .post<RawConfirmQuotaResponse>(
+      `${PHV_ADMIN_SIT_BASE_URL}/api/phv-admin/email-monitor/generate-confirm-quota-request`,
+      payload
+    )
+    .then((raw) => toConfirmQuotaResult(unwrapResult(raw)));
+}
+
+export function confirmEmailAnalysisResult(
+  path: string,
+  payload: Record<string, unknown>
+) {
+  const finalPath = path.startsWith('http')
+    ? path
+    : `${PHV_ADMIN_SIT_BASE_URL}${path}`;
+  return request.post(finalPath, payload);
 }

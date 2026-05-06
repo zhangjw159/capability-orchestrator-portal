@@ -15,6 +15,7 @@ const route = {
     { path: '/admin/orchestrator/flows', name: '流程定义' },
     { path: '/admin/orchestrator/execute', name: '执行调试' },
     { path: '/admin/orchestrator/executions', name: '执行历史' },
+    { path: '/admin/orchestrator/email-monitor', name: 'Email Monitor' },
     { path: '/admin/orchestrator/tools', name: '工具注册' },
     { path: '/admin/orchestrator/openapi-import', name: 'OpenAPI → MCP' },
   ],

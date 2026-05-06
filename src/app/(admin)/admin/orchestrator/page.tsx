@@ -56,6 +56,13 @@ const OrchestratorHome: React.FC = () => (
         </Card>
       </Link>
     </Col>
+    <Col xs={24} md={12}>
+      <Link href='/admin/orchestrator/email-monitor'>
+        <Card hoverable title='Email Monitor（Quotation）'>
+          基于邮箱查询待 confirm quotation，辅助人工确认报价结果。
+        </Card>
+      </Link>
+    </Col>
   </Row>
 );
 
