@@ -953,8 +953,9 @@ export function executeFlow(payload: ExecuteFlowPayload) {
   if (payload.flow) {
     body.flow = toCoreFlow(payload.flow);
   }
+  // 流程执行可能包含模型/外部工具长耗时；不设客户端超时，完整等待后端返回。
   return request
-    .post<RawExecutionResult>(`${PREFIX}/flows/execute`, body)
+    .post<RawExecutionResult>(`${PREFIX}/flows/execute`, body, { timeout: 0 })
     .then((raw) => {
       const res = unwrapResult(raw);
       return {
