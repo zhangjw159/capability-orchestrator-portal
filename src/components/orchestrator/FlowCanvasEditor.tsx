@@ -321,22 +321,36 @@ function toCanvas(flow: Flow): { nodes: Node[]; edges: Edge[] } {
       width: 180,
     },
   }));
-  const edges: Edge[] = (flow.edges ?? []).map((edge) => ({
-    id: edge.id || uuidv4(),
-    source:
+  const autoIdCount = new Map<string, number>();
+  const edges: Edge[] = (flow.edges ?? []).map((edge, index) => {
+    const source =
       (edge as { source?: string; from?: string }).source ??
       (edge as { from?: string }).from ??
-      '',
-    target:
+      '';
+    const target =
       (edge as { target?: string; to?: string }).target ??
       (edge as { to?: string }).to ??
-      '',
-    label: (edge as { label?: string }).label,
-    data: {
-      rawEdge: edge,
-    },
-    markerEnd: { type: MarkerType.ArrowClosed },
-  }));
+      '';
+    const label =
+      edge.label == null ? undefined : String((edge as { label?: unknown }).label);
+    let edgeId = String(edge.id ?? '').trim();
+    if (!edgeId) {
+      const signature = `${source}|${target}|${label ?? ''}|${String(Boolean(edge.default))}`;
+      const seq = autoIdCount.get(signature) ?? 0;
+      autoIdCount.set(signature, seq + 1);
+      edgeId = `auto-edge-${signature}-${seq}-${index}`;
+    }
+    return {
+      id: edgeId,
+      source,
+      target,
+      label,
+      data: {
+        rawEdge: edge,
+      },
+      markerEnd: { type: MarkerType.ArrowClosed },
+    };
+  });
   return { nodes, edges };
 }
 
@@ -582,6 +596,13 @@ function diffDsl(base: Flow, current: Flow): string[] {
     }
   }
   return lines;
+}
+
+function canonicalizeForDslDiff(flow: Flow): Flow {
+  const normalized = normalizeEditorFlow(flow);
+  const mapped = toCanvas(normalized);
+  const normalizedEdges = normalizeBranchEdgeLabels(mapped.edges, normalized.nodes);
+  return toFlow(normalized, mapped.nodes, normalizedEdges);
 }
 
 const FlowCanvasEditor = ({
@@ -1987,7 +2008,10 @@ const FlowCanvasEditor = ({
                   <Button onClick={runValidate}>校验</Button>
                   <Button
                     onClick={() => {
-                      const changes = diffDsl(baselineFlow, flowDraft);
+                      const currentFlow = toFlow(flowDraft, nodes, edges);
+                      const baseComparable = canonicalizeForDslDiff(baselineFlow);
+                      const currentComparable = canonicalizeForDslDiff(currentFlow);
+                      const changes = diffDsl(baseComparable, currentComparable);
                       if (changes.length === 0) {
                         setDslDiffText('与原始 DSL 一致（未检测到差异）');
                         message.success('DSL 回归校验通过');

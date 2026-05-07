@@ -14,6 +14,23 @@ import type {
   ConfirmQuotaQueryResult,
 } from '@/types/orchestrator';
 
+/** 从如 "S$139/day"、"S$50 per way" 中解析金额数字 */
+function parseMoneyAmount(text?: string): number | null {
+  if (!text || typeof text !== 'string') return null;
+  const normalized = text.replace(/,/g, '');
+  const match = normalized.match(/(\d+(?:\.\d+)?)/);
+  if (!match) return null;
+  const n = Number(match[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function formatMoneySg(amount: number): string {
+  return `S$${amount.toLocaleString('en-SG', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 const EmailMonitorPage = () => {
   const { message } = App.useApp();
   const [form] = Form.useForm<{ email: string }>();
@@ -37,6 +54,76 @@ const EmailMonitorPage = () => {
       second: '2-digit',
       hour12: false,
     }).format(date);
+  };
+
+  /** 组级税前合计文案：各 item 通常相同，取第一个非空 */
+  const getGroupEstimatedTotalText = (group: ConfirmQuotaGroup): string | undefined => {
+    for (const item of group.items) {
+      const t = item.estimatedTotalBeforeGstText?.trim();
+      if (t) return t;
+    }
+    return undefined;
+  };
+
+  /**
+   * 展示「怎么算出来的」：租金 ≈ 日单价 × 租期天数 × 车辆数；取还 ≈ 单程费 × 2（送+收）× 车辆数。
+   * 用首条 item 的字段做说明；若解析失败则仅展示文字说明。
+   */
+  const renderGroupTotalSection = (group: ConfirmQuotaGroup) => {
+    const ref = group.items[0];
+    const totalText = getGroupEstimatedTotalText(group);
+    const daily = parseMoneyAmount(ref?.dailyRateText);
+    const perWay = parseMoneyAmount(ref?.deliveryCollectionFeePerWayText);
+    const days = ref?.rentalDays;
+    const count = ref?.vehicleCount;
+
+    const lines: string[] = [];
+    if (
+      daily != null &&
+      typeof days === 'number' &&
+      typeof count === 'number' &&
+      perWay != null
+    ) {
+      const rentSub = daily * days * count;
+      const deliverySub = perWay * 2 * count;
+      const sum = rentSub + deliverySub;
+      lines.push(
+        `租金小计：${formatMoneySg(daily)}/天 × ${days} 天 × ${count} 辆 = ${formatMoneySg(rentSub)}`
+      );
+      lines.push(
+        `取还费用：${formatMoneySg(perWay)}/程 × 2 程（送车 + 收车）× ${count} 辆 = ${formatMoneySg(deliverySub)}`
+      );
+      lines.push(`按上式相加：${formatMoneySg(rentSub)} + ${formatMoneySg(deliverySub)} = ${formatMoneySg(sum)}`);
+      const declared = parseMoneyAmount(totalText);
+      if (declared != null && Math.abs(declared - sum) > 0.02) {
+        lines.push(
+          `提示：接口返回总额为 ${totalText ?? '-'}，与上式逐项相加 ${formatMoneySg(sum)} 不一致时，以接口为准（可能存在多条租期、减免或其它计费项）。`
+        );
+      }
+    } else {
+      lines.push(
+        '说明：税前合计一般由「日租 × 租期天数 × 车辆数」与「单程取还费 × 2（送车与收车各一程）× 车辆数」等组成，具体以后端/邮件解析规则为准。'
+      );
+    }
+
+    return (
+      <Card size='small' title='本组费用合计（税前 GST 前）' className='mt-3 border-blue-100 bg-blue-50/40'>
+        <Descriptions size='small' column={1} bordered>
+          <Descriptions.Item label='接口返回 estimated_total_before_gst（本组总额）'>
+            {totalText ?? '-'}
+          </Descriptions.Item>
+          <Descriptions.Item label='计算说明'>
+            <Space direction='vertical' size={4} className='w-full'>
+              {lines.map((line) => (
+                <div key={line.slice(0, 80)} className='text-sm text-neutral-800'>
+                  {line}
+                </div>
+              ))}
+            </Space>
+          </Descriptions.Item>
+        </Descriptions>
+      </Card>
+    );
   };
 
   const handleSearch = async () => {
@@ -120,8 +207,8 @@ const EmailMonitorPage = () => {
           {formatToSingaporeTime(item.collectionDatetime)}
         </Descriptions.Item>
         <Descriptions.Item label='daily_rate'>{item.dailyRateText ?? '-'}</Descriptions.Item>
-        <Descriptions.Item label='estimated_total_before_gst'>
-          {item.estimatedTotalBeforeGstText ?? '-'}
+        <Descriptions.Item label='delivery_collection_fee_per_way'>
+          {item.deliveryCollectionFeePerWayText ?? '-'}
         </Descriptions.Item>
         <Descriptions.Item label='delivery_location' span={2}>
           {item.deliveryLocation ?? '-'}
@@ -202,6 +289,7 @@ const EmailMonitorPage = () => {
                 <Space direction='vertical' size={12} className='w-full'>
                   {group.items.map((item, itemIndex) => renderItem(item, itemIndex))}
                 </Space>
+                {renderGroupTotalSection(group)}
               </Card>
             );
           })}
